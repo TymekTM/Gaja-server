@@ -1,0 +1,27 @@
+# FastAPI i WebSocket
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+websockets==12.0
+flask==2.3.3
+flask-cors==4.0.0
+
+# Baza danych
+sqlalchemy==2.0.23
+alembic==1.12.1
+
+# AI i ML
+openai==1.3.7
+anthropic==0.7.8
+
+# File monitoring
+watchdog==3.0.0
+
+# Inne biblioteki
+requests==2.31.0
+python-multipart==0.0.6
+pydantic==2.5.0
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+loguru==0.7.2
+schedule==1.2.0
+beautifulsoup4==4.12.2

@@ -1,0 +1,32 @@
+{
+    "server": {
+        "host": "0.0.0.0",
+        "port": 8001,
+        "debug": false
+    },
+    "database": {
+        "url": "sqlite:///./server_data.db",
+        "echo": false
+    },
+    "ai": {
+        "provider": "openai",
+        "model": "gpt-4.1-nano",
+        "temperature": 0.7,
+        "max_tokens": 1000
+    },
+    "api_keys": {
+        "openai": "YOUR_OPENAI_API_KEY_HERE",
+        "anthropic": "YOUR_ANTHROPIC_API_KEY_HERE"
+    },
+    "plugins": {
+        "auto_load": true,
+        "default_enabled": [
+            "weather_module",
+            "search_module"
+        ]
+    },
+    "logging": {
+        "level": "WARNING",
+        "file": "logs/server_{time:YYYY-MM-DD}.log"
+    }
+}

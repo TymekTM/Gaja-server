@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GAJA Assistant - Web UI</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #1e1e1e;
+            color: #ffffff;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #4CAF50;
+            text-align: center;
+        }
+        .status {
+            background: #2d2d2d;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .chat-container {
+            background: #2d2d2d;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .messages {
+            height: 400px;
+            overflow-y: auto;
+            border: 1px solid #444;
+            padding: 10px;
+            margin-bottom: 15px;
+            background: #1a1a1a;
+            border-radius: 4px;
+        }
+        .message {
+            margin-bottom: 10px;
+            padding: 8px;
+            border-radius: 4px;
+        }
+        .message.user {
+            background: #0066cc;
+            text-align: right;
+        }
+        .message.ai {
+            background: #4CAF50;
+        }
+        .message.system {
+            background: #666;
+            font-style: italic;
+        }
+        .message.error {
+            background: #f44336;
+        }
+        .input-container {
+            display: flex;
+            gap: 10px;
+        }
+        #messageInput {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #666;
+            border-radius: 4px;
+            background: #333;
+            color: white;
+        }
+        button {
+            padding: 10px 20px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+        .plugin-list {
+            background: #2d2d2d;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .plugin-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px;
+            margin: 5px 0;
+            background: #1a1a1a;
+            border-radius: 4px;
+        }
+        .plugin-enabled {
+            background: #2d5d2d;
+        }
+        .connected {
+            color: #4CAF50;
+        }
+        .disconnected {
+            color: #f44336;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 GAJA Assistant - Web UI</h1>
+
+        <div class="status">
+            <h3>Status Połączenia</h3>
+            <p>WebSocket: <span id="wsStatus" class="disconnected">Rozłączony</span></p>
+            <p>User ID: <span id="userId">1</span></p>
+        </div>
+
+        <div class="plugin-list">
+            <h3>Pluginy</h3>
+            <div id="pluginsList">Loading plugins...</div>
+            <button onclick="refreshPlugins()">Odśwież Pluginy</button>
+        </div>
+
+        <div class="chat-container">
+            <h3>Chat z AI</h3>
+            <div id="messages" class="messages"></div>
+            <div class="input-container">
+                <input type="text" id="messageInput" placeholder="Wpisz wiadomość..." disabled>
+                <button id="sendButton" onclick="sendMessage()" disabled>Wyślij</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let userId = '1';
+
+        function connect() {
+            try {
+                ws = new WebSocket(`ws://localhost:5000/ws/${userId}`);
+
+                ws.onopen = function(event) {
+                    document.getElementById('wsStatus').textContent = 'Połączony';
+                    document.getElementById('wsStatus').className = 'connected';
+                    document.getElementById('messageInput').disabled = false;
+                    document.getElementById('sendButton').disabled = false;
+                    addMessage('system', 'Połączono z serwerem');
+                    refreshPlugins();
+                };
+
+                ws.onmessage = function(event) {
+                    const data = JSON.parse(event.data);
+                    handleServerMessage(data);
+                };
+
+                ws.onclose = function(event) {
+                    document.getElementById('wsStatus').textContent = 'Rozłączony';
+                    document.getElementById('wsStatus').className = 'disconnected';
+                    document.getElementById('messageInput').disabled = true;
+                    document.getElementById('sendButton').disabled = true;
+                    addMessage('system', 'Rozłączono z serwerem');
+
+                    // Auto-reconnect po 3 sekundach
+                    setTimeout(connect, 3000);
+                };
+
+                ws.onerror = function(error) {
+                    addMessage('error', 'Błąd połączenia WebSocket');
+                };
+
+            } catch (error) {
+                addMessage('error', `Błąd połączenia: ${error.message}`);
+                setTimeout(connect, 3000);
+            }
+        }
+
+        function handleServerMessage(data) {
+            switch (data.type) {
+                case 'ai_response':
+                    addMessage('ai', data.response);
+                    break;
+                case 'function_result':
+                    addMessage('system', `Plugin ${data.function}: ${data.result}`);
+                    break;
+                case 'plugin_toggled':
+                    addMessage('system', `Plugin ${data.plugin} ${data.status}`);
+                    refreshPlugins();
+                    break;
+                case 'plugin_list':
+                    updatePluginsList(data.plugins);
+                    break;
+                case 'error':
+                    addMessage('error', data.message);
+                    break;
+                default:
+                    addMessage('system', `Nieznany typ: ${data.type}`);
+            }
+        }
+
+        function addMessage(type, content) {
+            const messages = document.getElementById('messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+
+            const timestamp = new Date().toLocaleTimeString();
+            const prefix = {
+                'user': 'Ty',
+                'ai': 'AI',
+                'system': 'System',
+                'error': 'Błąd'
+            }[type] || 'Info';
+
+            messageDiv.textContent = `[${timestamp}] ${prefix}: ${content}`;
+            messages.appendChild(messageDiv);
+            messages.scrollTop = messages.scrollHeight;
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const message = input.value.trim();
+
+            if (message && ws && ws.readyState === WebSocket.OPEN) {
+                const data = {
+                    type: 'ai_query',
+                    query: message,
+                    context: {}
+                };
+
+                ws.send(JSON.stringify(data));
+                addMessage('user', message);
+                input.value = '';
+            }
+        }
+
+        function refreshPlugins() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'plugin_list' }));
+            }
+        }
+
+        function updatePluginsList(plugins) {
+            const container = document.getElementById('pluginsList');
+            container.innerHTML = '';
+
+            if (!plugins || Object.keys(plugins).length === 0) {
+                container.innerHTML = '<p>Brak dostępnych pluginów</p>';
+                return;
+            }
+
+            for (const [name, enabled] of Object.entries(plugins)) {
+                const div = document.createElement('div');
+                div.className = `plugin-item ${enabled ? 'plugin-enabled' : ''}`;
+
+                const nameSpan = document.createElement('span');
+                nameSpan.textContent = name;
+
+                const button = document.createElement('button');
+                button.textContent = enabled ? 'Wyłącz' : 'Włącz';
+                button.onclick = () => togglePlugin(name, !enabled);
+
+                div.appendChild(nameSpan);
+                div.appendChild(button);
+                container.appendChild(div);
+            }
+        }
+
+        function togglePlugin(name, enable) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const data = {
+                    type: 'plugin_toggle',
+                    plugin: name,
+                    action: enable ? 'enable' : 'disable'
+                };
+                ws.send(JSON.stringify(data));
+            }
+        }
+
+        // Event listeners
+        document.getElementById('messageInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+
+        // Rozpocznij połączenie po załadowaniu strony
+        window.onload = function() {
+            connect();
+        };
+    </script>
+</body>
+</html>

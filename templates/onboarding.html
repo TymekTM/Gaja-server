@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+
+{% block title %}Pierwsza konfiguracja - GAJA Assistant{% endblock %}
+
+{% block content %}
+<div class="container">
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="text-center">Witaj w GAJA Assistant!</h3>
+                    <p class="text-center text-muted">Skonfigurujmy Twojego asystenta AI</p>
+                </div>
+                <div class="card-body">
+                    <div id="onboarding-progress" class="progress mb-4">
+                        <div class="progress-bar" role="progressbar" style="width: 20%"></div>
+                    </div>
+                    
+                    <form id="onboarding-form">
+                        <!-- Krok 1: Podstawowe informacje -->
+                        <div class="onboarding-step" id="step-basic" style="display: block;">
+                            <h4>Podstawowe informacje</h4>
+                            <div class="mb-3">
+                                <label for="user_name" class="form-label">Jak mam się do Ciebie zwracać?</label>
+                                <input type="text" class="form-control" id="user_name" name="user_name" 
+                                       placeholder="Twoje imię" required>
+                            </div>
+                            <div class="mb-3">
+                                <label for="location" class="form-label">Twoja lokalizacja</label>
+                                <input type="text" class="form-control" id="location" name="location" 
+                                       placeholder="Miasto, Kraj" value="Warsaw,PL">
+                            </div>
+                            <button type="button" class="btn btn-primary" onclick="nextStep()">Dalej</button>
+                        </div>
+                        
+                        <!-- Krok 2: Codzienny briefing -->
+                        <div class="onboarding-step" id="step-briefing" style="display: none;">
+                            <h4>Codzienny briefing</h4>
+                            <div class="mb-3">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="briefing_enabled" 
+                                           name="briefing_enabled" checked>
+                                    <label class="form-check-label" for="briefing_enabled">
+                                        Włącz codzienny briefing
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="mb-3">
+                                <label for="briefing_time" class="form-label">Godzina briefingu</label>
+                                <input type="time" class="form-control" id="briefing_time" 
+                                       name="briefing_time" value="08:00">
+                            </div>
+                            <div class="mb-3">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="include_weather" 
+                                           name="include_weather" checked>
+                                    <label class="form-check-label" for="include_weather">
+                                        Dołącz informacje o pogodzie
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="mb-3">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="include_news" 
+                                           name="include_news" checked>
+                                    <label class="form-check-label" for="include_news">
+                                        Dołącz najnowsze wiadomości
+                                    </label>
+                                </div>
+                            </div>
+                            <button type="button" class="btn btn-secondary" onclick="prevStep()">Wstecz</button>
+                            <button type="button" class="btn btn-primary" onclick="nextStep()">Dalej</button>
+                        </div>
+                        
+                        <!-- Krok 3: Klucze API -->
+                        <div class="onboarding-step" id="step-api" style="display: none;">
+                            <h4>Klucze API (opcjonalne)</h4>
+                            <p class="text-muted">Możesz dodać klucze API później w ustawieniach</p>
+                            <div class="mb-3">
+                                <label for="openai_key" class="form-label">OpenAI API Key</label>
+                                <input type="password" class="form-control" id="openai_key" 
+                                       name="openai_key" placeholder="sk-...">
+                            </div>
+                            <div class="mb-3">
+                                <label for="weather_key" class="form-label">Weather API Key</label>
+                                <input type="password" class="form-control" id="weather_key" 
+                                       name="weather_key" placeholder="Klucz do serwisu pogodowego">
+                            </div>
+                            <button type="button" class="btn btn-secondary" onclick="prevStep()">Wstecz</button>
+                            <button type="button" class="btn btn-primary" onclick="nextStep()">Dalej</button>
+                        </div>
+                        
+                        <!-- Krok 4: Ustawienia głosu -->
+                        <div class="onboarding-step" id="step-voice" style="display: none;">
+                            <h4>Ustawienia głosu</h4>
+                            <div class="mb-3">
+                                <label for="voice_speed" class="form-label">Prędkość mowy: <span id="speed-value">1.0</span></label>
+                                <input type="range" class="form-control-range" id="voice_speed" 
+                                       name="voice_speed" min="0.5" max="2.0" step="0.1" value="1.0"
+                                       oninput="document.getElementById('speed-value').textContent = this.value">
+                            </div>
+                            <div class="mb-3">
+                                <label for="voice_volume" class="form-label">Głośność: <span id="volume-value">0.8</span></label>
+                                <input type="range" class="form-control-range" id="voice_volume" 
+                                       name="voice_volume" min="0.1" max="1.0" step="0.1" value="0.8"
+                                       oninput="document.getElementById('volume-value').textContent = this.value">
+                            </div>
+                            <button type="button" class="btn btn-secondary" onclick="prevStep()">Wstecz</button>
+                            <button type="button" class="btn btn-success" onclick="completeOnboarding()">Zakończ konfigurację</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+let currentStep = 0;
+const steps = ['basic', 'briefing', 'api', 'voice'];
+
+function nextStep() {
+    if (currentStep < steps.length - 1) {
+        document.getElementById(`step-${steps[currentStep]}`).style.display = 'none';
+        currentStep++;
+        document.getElementById(`step-${steps[currentStep]}`).style.display = 'block';
+        updateProgress();
+    }
+}
+
+function prevStep() {
+    if (currentStep > 0) {
+        document.getElementById(`step-${steps[currentStep]}`).style.display = 'none';
+        currentStep--;
+        document.getElementById(`step-${steps[currentStep]}`).style.display = 'block';
+        updateProgress();
+    }
+}
+
+function updateProgress() {
+    const progress = ((currentStep + 1) / steps.length) * 100;
+    document.querySelector('.progress-bar').style.width = progress + '%';
+}
+
+async function completeOnboarding() {
+    const formData = new FormData(document.getElementById('onboarding-form'));
+    const data = {};
+    
+    // Collect all form data
+    for (let [key, value] of formData.entries()) {
+        if (key.startsWith('briefing_') || key.startsWith('include_')) {
+            data[key] = document.getElementById(key).checked;
+        } else {
+            data[key] = value;
+        }
+    }
+    
+    try {
+        // Save each step
+        await saveStep('user_name', {name: data.user_name});
+        await saveStep('location', {location: data.location});
+        await saveStep('daily_briefing', {
+            daily_briefing: {
+                enabled: data.briefing_enabled,
+                time: data.briefing_time,
+                include_weather: data.include_weather,
+                include_news: data.include_news
+            }
+        });
+        await saveStep('api_keys', {
+            api_keys: {
+                openai: data.openai_key,
+                weather: data.weather_key
+            }
+        });
+        await saveStep('voice_settings', {
+            voice_settings: {
+                voice_speed: parseFloat(data.voice_speed),
+                voice_volume: parseFloat(data.voice_volume)
+            }
+        });
+        
+        // Complete onboarding
+        const response = await fetch('/api/onboarding/complete', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({user_id: '1'})
+        });
+        
+        const result = await response.json();
+        if (result.success) {
+            alert('Konfiguracja zakończona pomyślnie!');
+            window.location.href = '/';
+        } else {
+            alert('Błąd: ' + (result.error || 'Nieznany błąd'));
+        }
+    } catch (error) {
+        console.error('Error completing onboarding:', error);
+        alert('Błąd podczas konfiguracji: ' + error.message);
+    }
+}
+
+async function saveStep(step, data) {
+    const response = await fetch('/api/onboarding/step', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            user_id: '1',
+            step: step,
+            data: JSON.stringify(data)
+        })
+    });
+    
+    if (!response.ok) {
+        throw new Error(`Failed to save step ${step}`);
+    }
+}
+</script>
+{% endblock %}
