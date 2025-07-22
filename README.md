@@ -1,12 +1,10 @@
 # 🧠 GAJA Server
 
-**AI-powered server component for GAJA Assistant - Plug & Play Beta Release**
+**AI-powered server component for GAJA Assistant - Beta Release**
 
 GAJA Server is a FastAPI-based backend that provides AI processing, memory management, and WebSocket communication for the GAJA Assistant ecosystem.
 
 ## 🚀 Quick Start
-
-### Option 1: Plug & Play (Recommended)
 
 ```bash
 # Clone or download this server folder
@@ -23,27 +21,13 @@ nano server_config.json
 python start.py
 ```
 
-### Option 2: Manual Setup
-
-```bash
-# Install Python 3.11+
-# Install dependencies
-pip install -r requirements_server.txt
-
-# Copy and edit config
-cp server_config.template.json server_config.json
-nano server_config.json
-
-# Start server
-python server_main.py
-```
-
 ## 📋 Requirements
 
 - **Python 3.11+** (Required)
 - **OpenAI API Key** (for AI features)
-- **2GB RAM** minimum
-- **100MB disk space**
+- **512 MB RAM** minimum for server to run 
+- **1GB disk space**
+- **Docker installed** - Gaja server was designed to run in docker container
 
 ## ⚙️ Configuration
 
@@ -51,27 +35,39 @@ The server uses `server_config.json` for configuration:
 
 ```json
 {
-  "server": {
-    "host": "0.0.0.0",
-    "port": 8001,
-    "debug": false
-  },
-  "ai": {
-    "provider": "openai",
-    "model": "gpt-4",
-    "api_key": "your-openai-api-key-here",
-    "max_tokens": 1500,
-    "temperature": 0.7
-  },
-  "database": {
-    "url": "sqlite:///./server_data.db"
-  },
-  "features": {
-    "memory_enabled": true,
-    "function_calling": true,
-    "web_search": true
-  }
+    "server": {
+        "host": "0.0.0.0",
+        "port": 8001,
+        "debug": false
+    },
+    "database": {
+        "url": "sqlite:///./server_data.db",
+        "echo": false
+    },
+    "ai": {
+        "provider": "openai",
+        //recomended model for it price and speed, models must support function calling
+        "model": "gpt-4.1-nano", 
+        "temperature": 0.7,
+        "max_tokens": 1000
+    },
+    "api_keys": {
+        "openai": "YOUR_OPENAI_API_KEY_HERE",
+        "anthropic": "YOUR_ANTHROPIC_API_KEY_HERE"
+    },
+    "plugins": {
+        "auto_load": true,
+        "default_enabled": [
+            "weather_module",
+            "search_module"
+        ]
+    },
+    "logging": {
+        "level": "WARNING",
+        "file": "logs/server_{time:YYYY-MM-DD}.log"
+    }
 }
+
 ```
 
 ### Essential Settings
@@ -85,10 +81,10 @@ The server uses `server_config.json` for configuration:
 The `start.py` script provides a convenient CLI interface:
 
 ```bash
-# Basic start
+# Start server with auto-setup (Docker if available)
 python start.py
 
-# Development mode (auto-reload, debug)
+# Development mode (always console mode)
 python start.py --dev
 
 # Force install dependencies
@@ -102,6 +98,12 @@ python start.py --port 9000
 
 # Override host
 python start.py --host 127.0.0.1
+
+# Force Docker mode
+python start.py --docker
+
+# Force console mode (disable Docker)
+python start.py --no-docker
 ```
 
 ## 🌐 API Endpoints
@@ -137,13 +139,6 @@ async def connect_to_server():
         print(response)
 ```
 
-### With Web UI
-
-Configure the web UI to connect to:
-```
-Server URL: http://localhost:8001
-WebSocket URL: ws://localhost:8001/ws
-```
 
 ## 📁 Project Structure
 
@@ -254,6 +249,30 @@ The server uses SQLite by default. For production:
 
 ## 🐳 Docker Support
 
+The server automatically uses Docker if available. You can control this behavior:
+
+```bash
+# Auto-detect (use Docker if available, fall back to console)
+python start.py
+
+# Force Docker mode (will fail if Docker not available)
+python start.py --docker
+
+# Force console mode (disable Docker)
+python start.py --no-docker
+
+# Development mode (always console, auto-reload)
+python start.py --dev
+```
+
+**Docker Image Management:**
+- If Docker is available, the server will automatically check for existing image
+- If image doesn't exist, it will build it from Dockerfile
+- Container runs with proper volume mounts for config, data, and logs
+- Environment variables are passed through for API keys
+
+**Manual Docker Usage:**
+
 ```dockerfile
 # Dockerfile included for containerization
 FROM python:3.11-slim
@@ -319,34 +338,6 @@ curl http://localhost:8001/health
 curl http://localhost:8001/status
 ```
 
-## 📊 Performance
-
-**Tested Configuration:**
-- Python 3.11
-- 2GB RAM
-- Single worker process
-
-**Benchmarks:**
-- ✅ 200 concurrent connections
-- ✅ <100ms response time (local AI)
-- ✅ 24/7 uptime tested
-
-For production with higher load, consider:
-- Multiple worker processes
-- Redis for caching
-- PostgreSQL database
-- Load balancer
-
-## 🔒 Security
-
-### Production Checklist
-
-- [ ] Change default secret key in config
-- [ ] Use environment variables for API keys
-- [ ] Enable HTTPS (reverse proxy)
-- [ ] Configure firewall rules
-- [ ] Regular security updates
-
 ### API Key Security
 
 ```bash
@@ -357,7 +348,7 @@ python start.py
 
 ## 📝 License
 
-MIT License - see LICENSE file for details.
+MPL V2.0 License - see LICENSE file for details.
 
 ## 🤝 Contributing
 
@@ -371,10 +362,5 @@ MIT License - see LICENSE file for details.
 
 - **Issues**: Create GitHub issue
 - **Discussions**: GitHub Discussions
-- **Documentation**: See `/docs` folder
 
----
-
-**Status: ✅ Beta Ready**
-**Version: 1.0.0-beta**
 **Last Updated: July 22, 2025**

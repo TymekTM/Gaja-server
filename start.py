@@ -21,6 +21,11 @@ try:
 except ImportError:
     requests = None
 
+try:
+    import docker
+except ImportError:
+    docker = None
+
 
 def load_env_file(env_path: Path = None):
     """Load environment variables from .env file."""
@@ -64,6 +69,9 @@ class GajaServerStarter:
         self.config_file = self.server_root / "server_config.json"
         self.log_dir = self.server_root / "logs"
         self.data_dir = self.server_root / "data"
+        self.dockerfile_path = self.server_root / "Dockerfile"
+        self.docker_image_name = "gaja-server"
+        self.docker_container_name = "gaja-server-container"
         
         # Setup basic logging
         self._setup_logging()
@@ -88,6 +96,147 @@ class GajaServerStarter:
             self.logger.error(f"Python 3.11+ required, found {sys.version}")
             return False
         return True
+    
+    def is_docker_available(self) -> bool:
+        """Check if Docker is installed and running."""
+        try:
+            result = subprocess.run(
+                ["docker", "--version"], 
+                capture_output=True, 
+                text=True, 
+                timeout=10
+            )
+            if result.returncode == 0:
+                self.logger.info(f"Docker found: {result.stdout.strip()}")
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.CalledProcessError):
+            pass
+        
+        self.logger.info("Docker not available or not running")
+        return False
+    
+    def docker_image_exists(self) -> bool:
+        """Check if Docker image exists."""
+        try:
+            result = subprocess.run(
+                ["docker", "images", "-q", self.docker_image_name],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            return bool(result.stdout.strip())
+        except Exception:
+            return False
+    
+    def build_docker_image(self) -> bool:
+        """Build Docker image if Dockerfile exists."""
+        if not self.dockerfile_path.exists():
+            self.logger.warning("Dockerfile not found, cannot build image")
+            return False
+        
+        self.logger.info("Building Docker image...")
+        try:
+            result = subprocess.run(
+                ["docker", "build", "-t", self.docker_image_name, "."],
+                cwd=self.server_root,
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            self.logger.info("Docker image built successfully")
+            return True
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Failed to build Docker image: {e}")
+            self.logger.error(f"Build output: {e.stderr}")
+            return False
+    
+    def stop_existing_container(self):
+        """Stop and remove existing container if running."""
+        try:
+            # Stop container if running
+            subprocess.run(
+                ["docker", "stop", self.docker_container_name],
+                capture_output=True,
+                timeout=30
+            )
+            # Remove container
+            subprocess.run(
+                ["docker", "rm", self.docker_container_name],
+                capture_output=True,
+                timeout=10
+            )
+            self.logger.info("Stopped existing container")
+        except Exception:
+            pass  # Container might not exist
+    
+    def start_docker_container(self, config: Dict) -> bool:
+        """Start server in Docker container."""
+        server_config = config.get("server", {})
+        port = server_config.get("port", 8001)
+        
+        # Stop existing container
+        self.stop_existing_container()
+        
+        # Prepare volume mounts
+        volumes = [
+            f"{self.config_file.absolute()}:/app/server_config.json:ro",
+            f"{self.log_dir.absolute()}:/app/logs",
+            f"{self.data_dir.absolute()}:/app/data"
+        ]
+        
+        # Prepare environment variables
+        env_vars = []
+        if os.getenv("OPENAI_API_KEY"):
+            env_vars.extend(["-e", f"OPENAI_API_KEY={os.getenv('OPENAI_API_KEY')}"])
+        if os.getenv("ANTHROPIC_API_KEY"):
+            env_vars.extend(["-e", f"ANTHROPIC_API_KEY={os.getenv('ANTHROPIC_API_KEY')}"])
+        if os.getenv("DEEPSEEK_API_KEY"):
+            env_vars.extend(["-e", f"DEEPSEEK_API_KEY={os.getenv('DEEPSEEK_API_KEY')}"])
+        
+        # Build Docker command
+        docker_cmd = [
+            "docker", "run", "-d",
+            "--name", self.docker_container_name,
+            "-p", f"{port}:{port}",
+            "--restart", "unless-stopped"
+        ]
+        
+        # Add volume mounts
+        for volume in volumes:
+            docker_cmd.extend(["-v", volume])
+        
+        # Add environment variables
+        docker_cmd.extend(env_vars)
+        
+        # Add image name
+        docker_cmd.append(self.docker_image_name)
+        
+        try:
+            result = subprocess.run(docker_cmd, check=True, capture_output=True, text=True)
+            container_id = result.stdout.strip()
+            self.logger.info(f"Docker container started: {container_id[:12]}")
+            
+            # Wait a moment and check if container is running
+            time.sleep(2)
+            result = subprocess.run(
+                ["docker", "ps", "-q", "-f", f"name={self.docker_container_name}"],
+                capture_output=True,
+                text=True
+            )
+            
+            if result.stdout.strip():
+                self.logger.info("Container is running successfully")
+                return True
+            else:
+                self.logger.error("Container failed to start")
+                # Show container logs
+                subprocess.run(["docker", "logs", self.docker_container_name])
+                return False
+                
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Failed to start Docker container: {e}")
+            self.logger.error(f"Error output: {e.stderr}")
+            return False
     
     def install_dependencies(self) -> bool:
         """Install required dependencies automatically."""
@@ -246,10 +395,15 @@ class GajaServerStarter:
         self.logger.warning("Server health check failed")
         return False
     
-    async def start_server(self, config: Dict, development: bool = False):
+    async def start_server(self, config: Dict, development: bool = False, use_docker: bool = False):
         """Start the GAJA server."""
         self.logger.info("Starting GAJA Server...")
         
+        # If using Docker
+        if use_docker and not development:
+            return self.start_docker_container(config)
+        
+        # Console mode (development or no Docker)
         # Import server modules after dependencies are installed
         try:
             import uvicorn
@@ -263,7 +417,7 @@ class GajaServerStarter:
         host = server_config.get("host", "0.0.0.0")
         port = server_config.get("port", 8001)
         
-        self.logger.info(f"Server starting on {host}:{port}")
+        self.logger.info(f"Server starting on {host}:{port} (console mode)")
         
         # Configure uvicorn
         uvicorn_config = {
@@ -277,14 +431,24 @@ class GajaServerStarter:
         }
         
         try:
-            await uvicorn.run(**uvicorn_config)
+            config_obj = uvicorn.Config(
+                app="server_main:app",
+                host=host,
+                port=port,
+                log_level="info" if not development else "debug",
+                reload=development,
+                workers=1 if development else server_config.get("workers", 1),
+                access_log=True
+            )
+            server = uvicorn.Server(config_obj)
+            await server.serve()
         except Exception as e:
             self.logger.error(f"Server startup failed: {e}")
             return False
         
         return True
     
-    def print_startup_info(self, config: Dict):
+    def print_startup_info(self, config: Dict, use_docker: bool = False, development: bool = False):
         """Print startup information."""
         server_config = config.get("server", {})
         host = server_config.get("host", "0.0.0.0")
@@ -304,8 +468,15 @@ class GajaServerStarter:
         print(f"  - Logs directory: {self.log_dir}")
         print(f"  - AI Provider: {config.get('ai', {}).get('provider', 'openai')}")
         print(f"  - Debug mode: {server_config.get('debug', False)}")
+        print(f"  - Runtime: {'Docker' if use_docker and not development else 'Console'}")
+        print(f"  - Mode: {'Development' if development else 'Production'}")
         print("="*60)
-        print("Press Ctrl+C to stop the server")
+        if use_docker and not development:
+            print("Docker container starting...")
+            print(f"Use 'docker logs {self.docker_container_name}' to view logs")
+            print(f"Use 'docker stop {self.docker_container_name}' to stop server")
+        else:
+            print("Press Ctrl+C to stop the server")
         print()
     
     async def run(self, args):
@@ -329,15 +500,63 @@ class GajaServerStarter:
         # Step 5: Check API keys (warning only)
         self.check_api_keys(config)
         
-        # Step 6: Print startup info
-        self.print_startup_info(config)
+        # Step 6: Determine runtime mode
+        use_docker = False
+        if not args.dev:  # Only use Docker in production mode
+            # Check force flags
+            if args.no_docker:
+                self.logger.info("Docker disabled by --no-docker flag")
+            elif args.docker:
+                if self.is_docker_available():
+                    use_docker = True
+                    self.logger.info("Docker forced by --docker flag")
+                    # Check and build image if needed
+                    if not self.docker_image_exists():
+                        self.logger.info("Docker image not found, building...")
+                        if not self.build_docker_image():
+                            self.logger.error("Docker build failed")
+                            return 1
+                    else:
+                        self.logger.info("Docker image found")
+                else:
+                    self.logger.error("Docker forced but not available")
+                    return 1
+            else:
+                # Auto-detect Docker
+                if self.is_docker_available():
+                    use_docker = True
+                    self.logger.info("Docker available, checking image...")
+                    if not self.docker_image_exists():
+                        self.logger.info("Docker image not found, building...")
+                        if not self.build_docker_image():
+                            self.logger.warning("Docker build failed, falling back to console mode")
+                            use_docker = False
+                        else:
+                            self.logger.info("Docker image built successfully")
+                    else:
+                        self.logger.info("Docker image found")
+                else:
+                    self.logger.info("Docker not available, using console mode")
+        else:
+            self.logger.info("Development mode: using console mode")
         
-        # Step 7: Start server
+        # Step 7: Print startup info
+        self.print_startup_info(config, use_docker, args.dev)
+        
+        # Step 8: Start server
         try:
-            await self.start_server(config, development=args.dev)
-            return 0
+            result = await self.start_server(config, development=args.dev, use_docker=use_docker)
+            if use_docker and not args.dev:
+                # For Docker mode, just return success if container started
+                return 0 if result else 1
+            else:
+                # For console mode, this will block until server stops
+                return 0
         except KeyboardInterrupt:
             self.logger.info("Server stopped by user")
+            if use_docker:
+                self.logger.info("Stopping Docker container...")
+                self.stop_existing_container()
             return 0
         except Exception as e:
             self.logger.error(f"Server failed: {e}")
@@ -351,20 +570,30 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python start.py                    # Start server with auto-setup
-  python start.py --dev              # Start in development mode
+  python start.py                    # Start server with auto-setup (Docker if available)
+  python start.py --dev              # Start in development mode (always console)
   python start.py --install-deps     # Force dependency installation
   python start.py --config custom.json  # Use custom config file
+  python start.py --docker           # Force Docker mode
+  python start.py --no-docker        # Force console mode
 
 First Run:
   1. python start.py --install-deps  # Install dependencies
   2. Edit server_config.json         # Add your API keys
-  3. python start.py                 # Start server
+  3. python start.py                 # Start server (Docker or console)
 
 For production:
   python start.py --install-deps
   # Edit server_config.json for production settings
-  python start.py
+  python start.py                    # Will use Docker if available
+
+For development:
+  python start.py --dev              # Always console mode with auto-reload
+
+Docker modes:
+  python start.py                    # Auto-detect Docker
+  python start.py --docker           # Force Docker (fail if not available)
+  python start.py --no-docker        # Force console mode
         """
     )
     
@@ -396,6 +625,18 @@ For production:
         "--host",
         type=str,
         help="Override server host"
+    )
+    
+    parser.add_argument(
+        "--docker",
+        action="store_true",
+        help="Force Docker mode (if Docker available)"
+    )
+    
+    parser.add_argument(
+        "--no-docker",
+        action="store_true", 
+        help="Force console mode (disable Docker)"
     )
     
     args = parser.parse_args()
