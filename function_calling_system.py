@@ -17,6 +17,7 @@ class FunctionCallingSystem:
         """Initialize function calling system."""
         self.modules = {}
         self.function_handlers: dict[str, dict[str, Any]] = {}
+        self._cached_module_instances = {}  # Cache for module instances
 
     async def initialize(self):
         """Asynchroniczna inicjalizacja systemu funkcji."""
@@ -174,33 +175,36 @@ class FunctionCallingSystem:
                             # Store handler for execution - create module instance
                             handler_name = f"{module_name}_{func['name']}"
 
-                            # Create module instance based on module type
-                            if hasattr(module, "WeatherModule"):
-                                module_instance = module.WeatherModule()
-                            elif hasattr(module, "SearchModule"):
-                                module_instance = module.SearchModule()
-                            elif hasattr(module, "CoreModule"):
-                                module_instance = module.CoreModule()
-                            elif hasattr(module, "MusicModule"):
-                                module_instance = module.MusicModule()
-                            elif hasattr(module, "APIModule"):
-                                module_instance = module.APIModule()
-                            elif hasattr(module, "WebModule"):
-                                module_instance = module.WebModule()
-                            elif hasattr(module, "MemoryModule"):
-                                module_instance = module.MemoryModule()
-                            elif hasattr(module, "PluginMonitorModule"):
-                                module_instance = module.PluginMonitorModule()
-                            elif hasattr(module, "OnboardingPluginModule"):
-                                module_instance = module.OnboardingPluginModule()
-                            else:
-                                logger.warning(
-                                    f"Could not create instance for {module_name}"
-                                )
-                                print(
-                                    f"DEBUG: Could not create instance for {module_name}"
-                                )
-                                continue
+                            # Create or get cached module instance based on module type
+                            if module_name not in self._cached_module_instances:
+                                if hasattr(module, "WeatherModule"):
+                                    self._cached_module_instances[module_name] = module.WeatherModule()
+                                elif hasattr(module, "SearchModule"):
+                                    self._cached_module_instances[module_name] = module.SearchModule()
+                                elif hasattr(module, "CoreModule"):
+                                    self._cached_module_instances[module_name] = module.CoreModule()
+                                elif hasattr(module, "MusicModule"):
+                                    self._cached_module_instances[module_name] = module.MusicModule()
+                                elif hasattr(module, "APIModule"):
+                                    self._cached_module_instances[module_name] = module.APIModule()
+                                elif hasattr(module, "WebModule"):
+                                    self._cached_module_instances[module_name] = module.WebModule()
+                                elif hasattr(module, "MemoryModule"):
+                                    self._cached_module_instances[module_name] = module.MemoryModule()
+                                elif hasattr(module, "PluginMonitorModule"):
+                                    self._cached_module_instances[module_name] = module.PluginMonitorModule()
+                                elif hasattr(module, "OnboardingPluginModule"):
+                                    self._cached_module_instances[module_name] = module.OnboardingPluginModule()
+                                else:
+                                    logger.warning(
+                                        f"Could not create instance for {module_name}"
+                                    )
+                                    print(
+                                        f"DEBUG: Could not create instance for {module_name}"
+                                    )
+                                    continue
+                            
+                            module_instance = self._cached_module_instances[module_name]
 
                             self.function_handlers[handler_name] = {
                                 "module": module_instance,
@@ -447,11 +451,47 @@ class FunctionCallingSystem:
             return param_descriptions[param_name]
         return f"The {param_name} parameter for {sub_name} command"
 
+    def _check_missing_parameters(self, function_name: str, parameters: dict[str, Any]) -> dict[str, Any] | None:
+        """Check if function has missing required parameters and generate clarification request.
+        
+        Args:
+            function_name: Name of the function to check
+            parameters: Parameters provided by the user
+            
+        Returns:
+            Clarification request dict if parameters are missing, None otherwise
+        """
+        # Check if this is a weather function that needs location
+        if function_name.startswith("weather_") and not parameters.get("location"):
+            return {
+                "type": "clarification_request",
+                "action_type": "clarification_request",
+                "message": "Potrzebuję informacji o lokalizacji aby sprawdzić pogodę.",
+                "clarification_data": {
+                    "question": "Dla jakiej lokalizacji chcesz sprawdzić pogodę?",
+                    "parameter": "location",
+                    "function": function_name,
+                    "provided_parameters": parameters
+                }
+            }
+        
+        # Add more function-specific parameter checks here as needed
+        # if function_name.startswith("music_") and not parameters.get("song"):
+        #     return clarification for missing song parameter...
+        
+        return None
+
     async def execute_function(
         self, function_name: str, arguments: dict[str, Any], conversation_history=None
     ):
         """Execute a function call through the plugin manager or server modules."""
         try:
+            # Check for missing required parameters first
+            clarification = self._check_missing_parameters(function_name, arguments)
+            if clarification:
+                logger.info(f"Missing required parameters for {function_name}, requesting clarification")
+                return clarification
+                
             # Get handler info
             handler_info = self.function_handlers.get(function_name)
             if not handler_info:

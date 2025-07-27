@@ -15,8 +15,8 @@
         "max_tokens": 1000
     },
     "tts": {
-        "model": "tts-1-hd",
-        "voice": "nova",
+        "model": "gpt-4o-mini-tts",
+        "voice": "sage",
         "speed": 1.0,
         "volume": 2.0
     },
