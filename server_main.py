@@ -6,6 +6,8 @@ import json
 import os
 import sys
 from pathlib import Path
+import base64
+from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -15,6 +17,12 @@ from websockets.exceptions import ConnectionClosed
 
 # Add server path
 sys.path.insert(0, str(Path(__file__).parent))
+
+# Add OpenAI import for TTS
+try:
+    from openai import AsyncOpenAI
+except ImportError:
+    AsyncOpenAI = None
 
 # Load environment variables from .env file
 try:
@@ -117,6 +125,19 @@ class ServerApp:
 
                 # Przetwórz zapytanie przez AI
                 try:
+                    # Get conversation history from database
+                    history = []
+                    if self.db_manager:
+                        try:
+                            history = await self.db_manager.get_user_history(user_id, limit=20)
+                            logger.debug(f"Retrieved {len(history)} messages from history for user {user_id}")
+                        except Exception as hist_err:
+                            logger.warning(f"Failed to get history for user {user_id}: {hist_err}")
+                    
+                    # Add history to context
+                    context["history"] = history
+                    context["user_id"] = user_id
+                    
                     ai_result = await self.ai_module.process_query(query, context)
                     logger.info(
                         f"AI module returned result type: {ai_result.get('type', 'unknown')}"
@@ -126,33 +147,91 @@ class ServerApp:
                     if ai_result.get("type") == "clarification_request":
                         # Send clarification request to client
                         clarification_data = ai_result.get("clarification_data", {})
+                        
+                        # Generate TTS for clarification question
+                        tts_audio = None
+                        question = clarification_data.get("question", "")
+                        if question:
+                            logger.info(f"Generating TTS for clarification: {question[:50]}...")
+                            try:
+                                tts_audio = await self._generate_tts_audio(question)
+                                logger.info(f"Generated TTS audio for clarification: {len(tts_audio) if tts_audio else 0} bytes")
+                            except Exception as e:
+                                logger.error(f"Failed to generate TTS for clarification: {e}")
+                        
+                        response_data = {
+                            "question": question,
+                            "context": clarification_data.get("context", ""),
+                            "actions": clarification_data.get("actions", {}),
+                            "timestamp": clarification_data.get("timestamp"),
+                            "original_query": query,
+                        }
+                        
+                        if tts_audio:
+                            response_data["tts_audio"] = base64.b64encode(tts_audio).decode('utf-8')
+                            # Add TTS configuration for client
+                            tts_config = self.config.get("tts", {}) if self.config else {}
+                            response_data["tts_config"] = {
+                                "volume": tts_config.get("volume", 1.0)
+                            }
+                            logger.info("TTS audio encoded and added to clarification response")
+                        
                         await self.connection_manager.send_to_user(
                             user_id,
-                            WebSocketMessage(
-                                "clarification_request",
-                                {
-                                    "question": clarification_data.get("question", ""),
-                                    "context": clarification_data.get("context", ""),
-                                    "actions": clarification_data.get("actions", {}),
-                                    "timestamp": clarification_data.get("timestamp"),
-                                    "original_query": query,
-                                },
-                            ),
+                            WebSocketMessage("clarification_request", response_data),
                         )
                         return
 
                     # Normal AI response
                     response = ai_result.get("response", "")
+                    
+                    # Save conversation to history
+                    if self.db_manager:
+                        try:
+                            await self.db_manager.save_interaction(user_id, query, response)
+                            logger.debug(f"Saved conversation to history for user {user_id}")
+                        except Exception as save_err:
+                            logger.warning(f"Failed to save conversation history: {save_err}")
+                    
+                    # Generate TTS audio if response contains text
+                    tts_audio = None
+                    try:
+                        parsed_response = json.loads(response)
+                        if isinstance(parsed_response, dict) and "text" in parsed_response:
+                            text_to_speak = parsed_response["text"]
+                            if text_to_speak:
+                                logger.debug("Generating TTS audio...")
+                                tts_audio = await self._generate_tts_audio(text_to_speak)
+                                logger.debug(f"Generated TTS audio: {len(tts_audio) if tts_audio else 0} bytes")
+                    except json.JSONDecodeError:
+                        # Try to use the response directly if it's a simple string
+                        if isinstance(response, str) and response.strip():
+                            logger.debug("Using response as direct text for TTS")
+                            tts_audio = await self._generate_tts_audio(response.strip())
+                    except Exception as tts_err:
+                        logger.error(f"TTS generation failed: {tts_err}")
+                    
+                    # Send AI response with optional TTS audio
+                    response_data = {
+                        "response": response,
+                        "query": query,
+                        "timestamp": message_data.get("timestamp"),
+                    }
+                    
+                    if tts_audio:
+                        response_data["tts_audio"] = base64.b64encode(tts_audio).decode('utf-8')
+                        # Add TTS configuration for client
+                        tts_config = self.config.get("tts", {}) if self.config else {}
+                        response_data["tts_config"] = {
+                            "volume": tts_config.get("volume", 1.0)
+                        }
+                        logger.info("TTS audio encoded and added to response")
+                    else:
+                        logger.info("No TTS audio to include in response")
+                    
                     await self.connection_manager.send_to_user(
                         user_id,
-                        WebSocketMessage(
-                            "ai_response",
-                            {
-                                "response": response,
-                                "query": query,
-                                "timestamp": message_data.get("timestamp"),
-                            },
-                        ),
+                        WebSocketMessage("ai_response", response_data),
                     )
 
                 except Exception as e:
@@ -185,17 +264,19 @@ class ServerApp:
                         await plugin_manager.enable_plugin_for_user(
                             plugin_name, user_id
                         )
-                        await self.db_manager.set_user_plugin_status(
-                            user_id, plugin_name, True
-                        )
+                        if self.db_manager:
+                            await self.db_manager.update_user_plugin_status(
+                                user_id, plugin_name, True
+                            )
                         status = "enabled"
                     else:
                         await plugin_manager.disable_plugin_for_user(
                             plugin_name, user_id
                         )
-                        await self.db_manager.set_user_plugin_status(
-                            user_id, plugin_name, False
-                        )
+                        if self.db_manager:
+                            await self.db_manager.update_user_plugin_status(
+                                user_id, plugin_name, False
+                            )
                         status = "disabled"
 
                     await self.connection_manager.send_to_user(
@@ -223,7 +304,9 @@ class ServerApp:
                 # Lista pluginów
                 try:
                     all_plugins = plugin_manager.get_all_plugins()
-                    user_plugins = await self.db_manager.get_user_plugins(user_id)
+                    user_plugins = []
+                    if self.db_manager:
+                        user_plugins = await self.db_manager.get_user_plugins(user_id)
 
                     # Połącz informacje o pluginach
                     plugins_info = []
@@ -411,6 +494,10 @@ class ServerApp:
     async def load_all_user_plugins(self):
         """Load plugins for all users from database."""
         try:
+            if not self.db_manager:
+                logger.warning("Database manager not available, skipping user plugin loading")
+                return
+                
             users = await self.db_manager.get_all_users()
             for user in users:
                 plugins = await self.db_manager.get_user_plugins(user["user_id"])
@@ -425,6 +512,51 @@ class ServerApp:
         except Exception as e:
             logger.debug(f"Error loading user plugins: {e}")
 
+    async def _generate_tts_audio(self, text: str) -> Optional[bytes]:
+        """Generate TTS audio from text using OpenAI API."""
+        try:
+            if not AsyncOpenAI:
+                logger.warning("OpenAI library not available for TTS")
+                return None
+                
+            # Get OpenAI API key from config or environment
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key and self.config:
+                api_key = self.config.get("openai", {}).get("api_key")
+            
+            if not api_key:
+                logger.warning("No OpenAI API key available for TTS")
+                return None
+            
+            # Initialize OpenAI client
+            client = AsyncOpenAI(api_key=api_key)
+            
+            # Get TTS configuration from config or use defaults
+            tts_config = self.config.get("tts", {}) if self.config else {}
+            model = tts_config.get("model", "tts-1")  # tts-1 or tts-1-hd
+            voice = tts_config.get("voice", "nova")   # alloy, echo, fable, onyx, nova, shimmer
+            speed = tts_config.get("speed", 1.0)      # 0.25 to 4.0
+            volume = tts_config.get("volume", 1.0)    # Will be used by client for playback
+            
+            # Generate speech
+            response = await client.audio.speech.create(
+                model=model,
+                voice=voice,
+                input=text,
+                response_format="mp3",
+                speed=speed
+            )
+            
+            # Get audio content - response content is available directly
+            audio_content = response.content
+            
+            logger.info(f"Generated TTS audio: {len(audio_content)} bytes")
+            return audio_content
+            
+        except Exception as e:
+            logger.error(f"TTS generation failed: {e}")
+            return None
+
     async def cleanup(self):
         """Clean up server resources."""
         try:
@@ -433,7 +565,15 @@ class ServerApp:
             if self.plugin_monitor:
                 await self.plugin_monitor.stop_monitoring()
             if self.db_manager and hasattr(self.db_manager, "close"):
-                await self.db_manager.close()
+                try:
+                    close_method = getattr(self.db_manager, "close")
+                    if close_method:
+                        if hasattr(close_method, "__await__"):
+                            await close_method()
+                        else:
+                            close_method()
+                except Exception as close_err:
+                    logger.warning(f"Error closing database: {close_err}")
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
 

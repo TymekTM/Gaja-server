@@ -3,13 +3,15 @@
 Provides REST API endpoints for web UI functionality.
 """
 
+import os
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from auth.security import security_manager
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
 
@@ -17,6 +19,12 @@ from loguru import logger
 # from server_main import server_app  # Import moved to avoid circular import
 from plugin_manager import plugin_manager
 from pydantic import BaseModel, Field
+
+# OpenAI for TTS
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 # Server app will be injected after initialization
 server_app = None
@@ -865,6 +873,75 @@ async def serve_webui():
     except Exception as e:
         logger.error(f"WebUI serve error: {e}")
         raise HTTPException(status_code=500, detail="Failed to serve WebUI") from e
+
+
+# TTS endpoint
+@router.post("/tts/stream")
+async def stream_tts(
+    request: dict[str, str],
+    current_user: dict[str, Any] = Depends(get_current_user)
+) -> StreamingResponse:
+    """Stream TTS audio from server."""
+    try:
+        text = request.get("text", "")
+        if not text:
+            raise HTTPException(status_code=400, detail="Text is required")
+        
+        # Check if OpenAI is available
+        if OpenAI is None:
+            raise HTTPException(status_code=500, detail="OpenAI library not available")
+        
+        # Get API key from environment or config
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            try:
+                from config_loader import load_config
+                config = load_config("server_config.json")
+                api_key = config.get("ai", {}).get("api_key")
+            except Exception:
+                pass
+        
+        if not api_key:
+            raise HTTPException(status_code=500, detail="OpenAI API key not configured")
+        
+        # Initialize OpenAI client
+        client = OpenAI(api_key=api_key)
+        
+        # TTS settings
+        model = request.get("model", "tts-1")
+        voice = request.get("voice", "alloy")
+        
+        logger.info(f"Generating TTS for user {current_user['id']}: {text[:50]}...")
+        
+        def generate_audio():
+            """Generate audio stream."""
+            try:
+                with client.audio.speech.with_streaming_response.create(
+                    model=model,
+                    voice=voice,
+                    input=text,
+                    response_format="opus",
+                ) as response:
+                    for chunk in response.iter_bytes():
+                        yield chunk
+            except Exception as e:
+                logger.error(f"TTS generation error: {e}")
+                raise HTTPException(status_code=500, detail=f"TTS generation failed: {e}")
+        
+        return StreamingResponse(
+            generate_audio(),
+            media_type="audio/opus",
+            headers={
+                "Content-Disposition": "inline; filename=tts.opus",
+                "Cache-Control": "no-cache"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"TTS stream error: {e}")
+        raise HTTPException(status_code=500, detail=f"TTS stream failed: {e}")
 
 
 # Export router
