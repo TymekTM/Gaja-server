@@ -745,7 +745,7 @@ async def generate_response(
 
         if use_function_calling and PROVIDER.lower() == "openai":
             # Get functions directly from plugin_manager
-            from server.function_calling_system import FunctionCallingSystem
+            from function_calling_system import FunctionCallingSystem
 
             # Initialize function calling system
             function_calling_system = FunctionCallingSystem()
@@ -788,8 +788,6 @@ async def generate_response(
 
         # --- PROMPT LOGGING ---
         try:
-            import json
-
             timestamp = datetime.datetime.now().isoformat()
 
             with open("user_data/prompts_log.txt", "a", encoding="utf-8") as f:
@@ -839,7 +837,6 @@ async def generate_response(
                 resp.get("message", {}).get("content", "").strip() if resp else ""
             )
             import datetime
-            import json
 
             with open("user_data/prompts_log.txt", "a", encoding="utf-8") as f:
                 raw_api_msg = {"role": "assistant_api_raw", "content": raw_content}
@@ -953,8 +950,6 @@ class AIModule:
 
     async def process_query(self, query: str, context: dict) -> dict:
         """Przetwarza zapytanie użytkownika i zwraca odpowiedź AI."""
-        import json
-
         try:
             print(f"DEBUG: process_query called with context: {context}")
             print(f"DEBUG: context type: {type(context)}")

@@ -30,7 +30,7 @@ cache/
 *.sqlite3
 
 # Config files with secrets
-.env
+# .env - Allow .env for development, but be careful in production
 server_config.json
 admin_credentials.txt
 

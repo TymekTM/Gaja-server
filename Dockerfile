@@ -19,7 +19,12 @@ RUN apt-get update && apt-get install -y \
 COPY requirements_server.txt .
 
 # Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir -r requirements_server.txt
+
+# Debug: List installed packages and verify critical packages
+RUN pip list | grep -E "(aiohttp|fastapi|uvicorn)"
+RUN python -c "import aiohttp, fastapi, uvicorn; print('Core packages verified')"
 
 # Copy application code
 COPY . .

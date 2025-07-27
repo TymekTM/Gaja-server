@@ -145,6 +145,18 @@ class ConnectionManager:
                 return False
 
             websocket = self.active_connections[user_id]
+            
+            # Sprawdź czy WebSocket jest jeszcze aktywny
+            try:
+                # Sprawdź stan połączenia przez próbę ping
+                if hasattr(websocket, 'client_state') and websocket.client_state.name != 'CONNECTED':
+                    logger.debug(f"WebSocket for user {user_id} is not in CONNECTED state: {websocket.client_state.name}")
+                    await self.disconnect(user_id, reason="websocket_not_connected")
+                    return False
+            except Exception as state_check_error:
+                logger.debug(f"Could not check WebSocket state for user {user_id}: {state_check_error}")
+                # Kontynuuj próbę wysłania, ale bądź gotowy na błąd
+            
             message_dict = message.to_dict()
 
             await websocket.send_text(json.dumps(message_dict))
@@ -159,7 +171,18 @@ class ConnectionManager:
             return True
 
         except Exception as e:
-            logger.error(f"Error sending message to user {user_id}: {e}")
+            # Sprawdź czy to błąd związany z rozłączonym WebSocket
+            error_str = str(e).lower()
+            if any(phrase in error_str for phrase in [
+                "websocket is not connected",
+                "need to call \"accept\" first",
+                "connection closed",
+                "websocket disconnected"
+            ]):
+                logger.debug(f"WebSocket disconnected for user {user_id}: {e}")
+            else:
+                logger.error(f"Error sending message to user {user_id}: {e}")
+            
             # Usuń połączenie jeśli jest uszkodzone
             await self.disconnect(user_id, reason="send_error")
             return False

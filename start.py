@@ -154,20 +154,43 @@ class GajaServerStarter:
         """Stop and remove existing container if running."""
         try:
             # Stop container if running
-            subprocess.run(
+            result = subprocess.run(
                 ["docker", "stop", self.docker_container_name],
                 capture_output=True,
-                timeout=30
+                timeout=30,
+                text=True
             )
+            if result.returncode == 0:
+                self.logger.info(f"Stopped container: {self.docker_container_name}")
+            
             # Remove container
-            subprocess.run(
+            result = subprocess.run(
                 ["docker", "rm", self.docker_container_name],
                 capture_output=True,
+                timeout=10,
+                text=True
+            )
+            if result.returncode == 0:
+                self.logger.info(f"Removed container: {self.docker_container_name}")
+        except Exception as e:
+            self.logger.warning(f"Error stopping container: {e}")
+    
+    def get_container_status(self) -> str:
+        """Get current container status."""
+        try:
+            result = subprocess.run(
+                ["docker", "ps", "-a", "--filter", f"name={self.docker_container_name}", "--format", "table {{.Status}}"],
+                capture_output=True,
+                text=True,
                 timeout=10
             )
-            self.logger.info("Stopped existing container")
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split('\n')
+                if len(lines) > 1:  # First line is header
+                    return lines[1].strip()
+            return "Not found"
         except Exception:
-            pass  # Container might not exist
+            return "Unknown"
     
     def start_docker_container(self, config: Dict) -> bool:
         """Start server in Docker container."""
@@ -395,6 +418,71 @@ class GajaServerStarter:
         self.logger.warning("Server health check failed")
         return False
     
+    def handle_docker_command(self, command: str) -> int:
+        """Handle Docker-specific commands."""
+        if not self.is_docker_available():
+            self.logger.error("Docker is not available")
+            return 1
+            
+        if command == "build-server":
+            self.logger.info("Building Docker image...")
+            if self.build_docker_image():
+                self.logger.info("Docker image built successfully")
+                return 0
+            else:
+                self.logger.error("Failed to build Docker image")
+                return 1
+                
+        elif command == "start-server":
+            self.logger.info("Starting Docker container...")
+            config = self.load_config()
+            
+            # Check if image exists
+            if not self.docker_image_exists():
+                self.logger.info("Docker image not found, building first...")
+                if not self.build_docker_image():
+                    self.logger.error("Failed to build Docker image")
+                    return 1
+            
+            # Start container
+            if self.start_docker_container(config):
+                self.logger.info("Docker container started successfully")
+                
+                # Show container info
+                status = self.get_container_status()
+                self.logger.info(f"Container status: {status}")
+                
+                # Show useful commands
+                print("\n" + "="*60)
+                print("Docker Container Management")
+                print("="*60)
+                print(f"Container name: {self.docker_container_name}")
+                print(f"View logs: docker logs {self.docker_container_name}")
+                print(f"Follow logs: docker logs -f {self.docker_container_name}")
+                print(f"Stop server: python start.py stop-server")
+                print(f"Container status: docker ps")
+                print("="*60)
+                return 0
+            else:
+                self.logger.error("Failed to start Docker container")
+                return 1
+                
+        elif command == "stop-server":
+            self.logger.info("Stopping Docker container...")
+            status = self.get_container_status()
+            
+            if "Not found" in status:
+                self.logger.warning("No container found to stop")
+                return 0
+            
+            self.stop_existing_container()
+            self.logger.info("Docker container stopped successfully")
+            return 0
+            
+        else:
+            self.logger.error(f"Unknown Docker command: {command}")
+            return 1
+    
     async def start_server(self, config: Dict, development: bool = False, use_docker: bool = False):
         """Start the GAJA server."""
         self.logger.info("Starting GAJA Server...")
@@ -482,6 +570,10 @@ class GajaServerStarter:
     async def run(self, args):
         """Main run method."""
         self.logger.info("GAJA Server Starter - Beta Release")
+        
+        # Handle Docker-specific commands first
+        if hasattr(args, 'command') and args.command in ['build-server', 'start-server', 'stop-server']:
+            return self.handle_docker_command(args.command)
         
         # Step 1: Check Python version
         if not self.check_python_version():
@@ -577,6 +669,11 @@ Examples:
   python start.py --docker           # Force Docker mode
   python start.py --no-docker        # Force console mode
 
+Docker Management:
+  python start.py build-server       # Build Docker image only
+  python start.py start-server       # Start Docker container (builds if needed)
+  python start.py stop-server        # Stop and remove Docker container
+
 First Run:
   1. python start.py --install-deps  # Install dependencies
   2. Edit server_config.json         # Add your API keys
@@ -595,6 +692,14 @@ Docker modes:
   python start.py --docker           # Force Docker (fail if not available)
   python start.py --no-docker        # Force console mode
         """
+    )
+    
+    # Add positional argument for commands
+    parser.add_argument(
+        'command',
+        nargs='?',
+        choices=['build-server', 'start-server', 'stop-server'],
+        help='Docker management commands'
     )
     
     parser.add_argument(

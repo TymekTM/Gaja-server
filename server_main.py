@@ -11,6 +11,7 @@ import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
+from websockets.exceptions import ConnectionClosed
 
 # Add server path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -104,8 +105,9 @@ class ServerApp:
 
             elif message_type == "query" or message_type == "ai_query":
                 # Zapytanie AI
-                query = message_data.get("query", "")
-                context = message_data.get("context", {})
+                data = message_data.get("data", {})
+                query = data.get("query", "")
+                context = data.get("context", {})
 
                 if not query:
                     await self.connection_manager.send_to_user(
@@ -554,6 +556,9 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
             except WebSocketDisconnect:
                 logger.info(f"WebSocket disconnected for user: {user_id}")
                 break
+            except ConnectionClosed:
+                logger.info(f"WebSocket connection closed for user: {user_id}")
+                break  
             except json.JSONDecodeError as e:
                 logger.warning(f"Invalid JSON from user {user_id}: {e}")
                 # Tylko spróbuj wysłać błąd jeśli użytkownik jest połączony
@@ -570,7 +575,19 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                             f"Could not send JSON error message to {user_id}: {send_error}"
                         )
             except Exception as e:
-                logger.error(f"WebSocket message error for user {user_id}: {e}")
+                # Sprawdź czy to błąd związany z WebSocket
+                error_str = str(e).lower()
+                if any(phrase in error_str for phrase in [
+                    "websocket is not connected", 
+                    "need to call \"accept\" first",
+                    "connection closed",
+                    "websocket disconnected"
+                ]):
+                    logger.info(f"WebSocket connection lost for user {user_id}: {e}")
+                    break  # Wyjdź z pętli gdy WebSocket jest rozłączony
+                else:
+                    logger.error(f"WebSocket message error for user {user_id}: {e}")
+                
                 # Tylko spróbuj wysłać błąd jeśli użytkownik jest połączony
                 if user_id in connection_manager.active_connections:
                     try:
@@ -584,7 +601,8 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                         logger.debug(
                             f"Could not send error message to {user_id}: {send_error}"
                         )
-                        # Nie loguj tego jako ERROR żeby uniknąć spam logów
+                        # Wyjdź z pętli jeśli nie można wysłać wiadomości
+                        break
 
     except Exception as e:
         logger.error(f"WebSocket connection error for user {user_id}: {e}")
