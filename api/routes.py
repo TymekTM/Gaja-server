@@ -7,7 +7,7 @@ import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from auth.security import security_manager
 from fastapi import APIRouter, Depends, HTTPException
@@ -27,7 +27,7 @@ except ImportError:
     OpenAI = None
 
 # Server app will be injected after initialization
-server_app = None
+server_app: Optional[Any] = None
 
 
 def set_server_app(app):
@@ -609,6 +609,12 @@ async def health_check(
         raise HTTPException(status_code=500, detail="Health check failed") from e
 
 
+# Alias for health check
+@router.get('/health')
+async def health_alias():
+    return await health_check()
+
+
 # Legacy status endpoint for compatibility
 @router.get("/status")
 async def status_check() -> dict[str, Any]:
@@ -943,6 +949,194 @@ async def stream_tts(
         logger.error(f"TTS stream error: {e}")
         raise HTTPException(status_code=500, detail=f"TTS stream failed: {e}")
 
+
+# Habit engine endpoints
+try:
+    from habit.engine import HabitEngine
+
+    habit_engine = HabitEngine()
+except Exception:
+    habit_engine = None
+
+@router.post("/habit/events")
+async def habit_log_event(event: dict[str, Any]):
+    if not habit_engine:
+        raise HTTPException(status_code=503, detail="Habit engine unavailable")
+    habit_engine.log_event(event)
+    habit_engine.scan_new_habits()
+    return {"success": True}
+
+@router.post("/habit/decide")
+async def habit_decide(context: dict[str, Any]):
+    if not habit_engine:
+        raise HTTPException(status_code=503, detail="Habit engine unavailable")
+    decision = habit_engine.decide(context)
+    if not decision:
+        return {"decision": None}
+    return {"decision": {
+        "id": decision.id,
+        "action": {"verb": decision.action.verb, "object": decision.action.object, "params": getattr(decision.action, 'params', {})},
+        "mode": decision.mode,
+        "reason": decision.reason,
+        "predicted_reward": decision.predicted_reward,
+        "executed": decision.executed
+    }}
+
+@router.get("/habit/habits")
+async def habit_list(mode: str | None = None):
+    if not habit_engine:
+        raise HTTPException(status_code=503, detail="Habit engine unavailable")
+    habits = habit_engine.storage.get_habits(mode)
+    return {"habits": [
+        {
+            "id": h.habit_id,
+            "action": {"verb": h.action.verb, "object": h.action.object},
+            "mode": h.mode,
+            "stats": h.stats,
+            "context_proto": h.context_proto,
+        } for h in habits
+    ]}
+
+class FeedbackRequest(BaseModel):
+    decision_id: str
+    outcome: str
+    latency_ms: int | None = None
+
+@router.post("/habit/feedback")
+async def habit_feedback(decision_id: str, outcome: str, latency_ms: int | None = None):
+    if not habit_engine:
+        raise HTTPException(status_code=503, detail="Habit engine unavailable")
+    try:
+        fb_id = habit_engine.feedback(decision_id, outcome, latency_ms)
+        return {"feedback_id": fb_id}
+    except Exception as e:
+        logger.exception("Feedback processing failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post('/habit/promote/{habit_id}')
+async def habit_promote(habit_id: str):
+    if not habit_engine:
+        raise HTTPException(status_code=503, detail='Habit engine unavailable')
+    h = habit_engine.storage.get_habit(habit_id)
+    if not h:
+        raise HTTPException(status_code=404, detail='Habit not found')
+    habit_engine.storage.update_habit_mode(habit_id, 'auto')
+    return {'habit_id': habit_id, 'new_mode': 'auto'}
+
+@router.post('/habit/demote/{habit_id}')
+async def habit_demote(habit_id: str):
+    if not habit_engine:
+        raise HTTPException(status_code=503, detail='Habit engine unavailable')
+    h = habit_engine.storage.get_habit(habit_id)
+    if not h:
+        raise HTTPException(status_code=404, detail='Habit not found')
+    habit_engine.storage.update_habit_mode(habit_id, 'suggest')
+    return {'habit_id': habit_id, 'new_mode': 'suggest'}
+
+@router.get('/habit/telemetry')
+async def habit_telemetry():
+    if not habit_engine:
+        raise HTTPException(status_code=503, detail='Habit engine unavailable')
+    out = []
+    for h in habit_engine.storage.get_habits():
+        key = f"{h.action.verb}|{h.action.object}"
+        theta_info = habit_engine.policy.get_theta(key)
+        if theta_info:
+            feats, vals = theta_info
+            top = sorted(zip(feats, vals), key=lambda x: abs(x[1]), reverse=True)[:5]
+        else:
+            top = []
+        out.append({
+            'habit_id': h.habit_id,
+            'action': {'verb': h.action.verb, 'object': h.action.object},
+            'mode': h.mode,
+            'stats': h.stats,
+            'top_features': top
+        })
+    return {'habits': out}
+
+class HabitLimitsRequest(BaseModel):
+    decision_cooldown: int | None = None
+    suggestion_limit_per_hour: int | None = None
+
+@router.post('/habit/limits')
+async def habit_set_limits(req: HabitLimitsRequest):
+    if not habit_engine:
+        raise HTTPException(status_code=503, detail='Habit engine unavailable')
+    if req.decision_cooldown is not None:
+        habit_engine.decision_cooldown = req.decision_cooldown
+    if req.suggestion_limit_per_hour is not None:
+        habit_engine.suggestion_limit_per_hour = req.suggestion_limit_per_hour
+    return {'decision_cooldown': habit_engine.decision_cooldown, 'suggestion_limit_per_hour': habit_engine.suggestion_limit_per_hour}
+
+@router.delete('/habit/{habit_id}')
+async def habit_delete(habit_id: str):
+    if not habit_engine:
+        raise HTTPException(status_code=503, detail='Habit engine unavailable')
+    if not habit_engine.storage.get_habit(habit_id):
+        raise HTTPException(status_code=404, detail='Habit not found')
+    habit_engine.storage.delete_habit(habit_id)
+    return {'deleted': habit_id}
+
+@router.get('/habit/decisions')
+async def habit_decisions(limit: int = 50):
+    if not habit_engine:
+        raise HTTPException(status_code=503, detail='Habit engine unavailable')
+    return {'decisions': habit_engine.storage.list_decisions(limit)}
+
+@router.get('/habit/feedback')
+async def habit_feedback_list(limit: int = 50):
+    if not habit_engine:
+        raise HTTPException(status_code=503, detail='Habit engine unavailable')
+    return {'feedback': habit_engine.storage.list_feedback(limit)}
+
+class ExecuteRequest(BaseModel):
+    decision_id: str
+
+@router.post('/habit/execute')
+async def habit_execute(req: ExecuteRequest):
+    if not habit_engine:
+        raise HTTPException(status_code=503, detail='Habit engine unavailable')
+    ok = habit_engine.execute_action(req.decision_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail='Decision not found')
+    return {'executed': True}
+
+class HabitSchedulerRequest(BaseModel):
+    interval: int | None = None
+
+@router.post('/habit/scheduler/start')
+async def habit_scheduler_start(req: HabitSchedulerRequest):
+    if not habit_engine:
+        raise HTTPException(status_code=503, detail='Habit engine unavailable')
+    if req.interval is not None:
+        habit_engine.scheduler_interval = req.interval
+    habit_engine.start_scheduler()
+    return {'started': True, 'interval': habit_engine.scheduler_interval}
+
+@router.post('/habit/scheduler/stop')
+async def habit_scheduler_stop():
+    if not habit_engine:
+        raise HTTPException(status_code=503, detail='Habit engine unavailable')
+    habit_engine.stop_scheduler()
+    return {'stopped': True}
+
+class HabitImportRequest(BaseModel):
+    data: dict
+    merge: bool = True
+
+@router.get('/habit/export')
+async def habit_export():
+    if not habit_engine:
+        raise HTTPException(status_code=503, detail='Habit engine unavailable')
+    return habit_engine.export_state()
+
+@router.post('/habit/import')
+async def habit_import(req: HabitImportRequest):
+    if not habit_engine:
+        raise HTTPException(status_code=503, detail='Habit engine unavailable')
+    habit_engine.import_state(req.data, merge=req.merge)
+    return {'imported': True}
 
 # Export router
 __all__ = ["router"]
