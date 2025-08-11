@@ -4,7 +4,7 @@ import urllib.parse
 from typing import Any
 
 import aiohttp
-from config_manager import get_database_manager
+from config.config_manager import get_database_manager
 
 logger = logging.getLogger(__name__)
 

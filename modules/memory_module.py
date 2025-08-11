@@ -4,7 +4,7 @@ server."""
 import logging
 from typing import Any
 
-from config_manager import DatabaseManager
+from config.config_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
 

@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from config_manager import get_database_manager
+from config.config_manager import get_database_manager
 
 from .api_module import get_api_module
 
