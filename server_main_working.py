@@ -14,18 +14,18 @@ from loguru import logger
 sys.path.insert(0, str(Path(__file__).parent))
 
 # Import server components
-from ai_module import AIModule
+from modules.ai_module import AIModule
 
 # Import API routes
 from api.routes import router as api_router
 from api.routes import set_server_app
-from config_loader import load_config
-from config_manager import initialize_database_manager
+from config.config_loader import load_config
+from config.config_manager import initialize_database_manager
 from extended_webui import ExtendedWebUI
-from function_calling_system import FunctionCallingSystem
-from onboarding_module import OnboardingModule
-from plugin_manager import plugin_manager
-from plugin_monitor import plugin_monitor
+from core.function_calling_system import FunctionCallingSystem
+from modules.onboarding_module import OnboardingModule
+from core.plugin_manager import plugin_manager
+from core.plugin_monitor import plugin_monitor
 from proactive_assistant_simple import get_proactive_assistant
 
 # Global server instance
@@ -61,7 +61,7 @@ class ServerApp:
             logger.info("Database initialized")
 
             # Initialize modules
-            from config_loader import ConfigLoader
+            from config.config_loader import ConfigLoader
 
             config_loader = ConfigLoader("server_config.json")
             self.onboarding_module = OnboardingModule(config_loader, self.db_manager)

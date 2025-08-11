@@ -68,20 +68,20 @@ except Exception as e:
     logger.error(f"❌ Error loading .env file: {e}")
 
 # Import server components
-from ai_module import AIModule
+from modules.ai_module import AIModule
 
 # Import API routes
 from api.routes import router as api_router
 from api.routes import set_server_app
-from config_loader import load_config
-from config_manager import initialize_database_manager
+from config.config_loader import load_config
+from config.config_manager import initialize_database_manager
 from extended_webui import ExtendedWebUI
-from function_calling_system import FunctionCallingSystem
-from onboarding_module import OnboardingModule
-from plugin_manager import plugin_manager
-from plugin_monitor import plugin_monitor
+from core.function_calling_system import FunctionCallingSystem
+from modules.onboarding_module import OnboardingModule
+from core.plugin_manager import plugin_manager
+from core.plugin_monitor import plugin_monitor
 from proactive_assistant_simple import get_proactive_assistant
-from websocket_manager import WebSocketMessage, connection_manager
+from core.websocket_manager import WebSocketMessage, connection_manager
 
 # Global server instance
 server_app = None
@@ -103,6 +103,14 @@ class ServerApp:
     async def handle_websocket_message(self, user_id: str, message_data: dict) -> None:
         """Obsługuje wiadomości WebSocket."""
         try:
+            # Sprawdź czy message_data nie jest None
+            if message_data is None:
+                logger.error(f"Received None message_data from user {user_id}")
+                await self.connection_manager.send_to_user(
+                    user_id, WebSocketMessage("error", {"message": "Invalid message format"})
+                )
+                return
+                
             message_type = message_data.get("type", "unknown")
             logger.info(f"WebSocket message from {user_id}: {message_type}")
 
@@ -111,8 +119,8 @@ class ServerApp:
                 logger.info(f"Handshake completed for user {user_id}")
                 return
 
-            elif message_type == "query" or message_type == "ai_query":
-                # Zapytanie AI
+            elif message_type == "query" or message_type == "ai_query" or message_type == "voice_command":
+                # Zapytanie AI (tekstowe lub głosowe)
                 data = message_data.get("data", {})
                 query = data.get("query", "")
                 context = data.get("context", {})
@@ -441,7 +449,7 @@ class ServerApp:
             logger.info("Database initialized")
 
             # Initialize modules
-            from config_loader import ConfigLoader
+            from config.config_loader import ConfigLoader
 
             config_loader = ConfigLoader("server_config.json")
             self.onboarding_module = OnboardingModule(config_loader, self.db_manager)

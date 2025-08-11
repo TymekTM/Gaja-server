@@ -17,7 +17,7 @@ from loguru import logger
 
 # Import server components
 # from server_main import server_app  # Import moved to avoid circular import
-from plugin_manager import plugin_manager
+from core.plugin_manager import plugin_manager
 from pydantic import BaseModel, Field
 
 # OpenAI for TTS
@@ -689,7 +689,7 @@ async def ws_status(
         # Jeśli nie ma server_app, spróbuj zaimportować connection_manager bezpośrednio
         if not hasattr(server_app, "connection_manager"):
             try:
-                from websocket_manager import connection_manager
+                from core.websocket_manager import connection_manager
 
                 connected = connection_manager.is_connected(user_id)
             except ImportError:
@@ -901,7 +901,7 @@ async def stream_tts(
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             try:
-                from config_loader import load_config
+                from config.config_loader import load_config
                 config = load_config("server_config.json")
                 api_key = config.get("ai", {}).get("api_key")
             except Exception:

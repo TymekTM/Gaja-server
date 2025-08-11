@@ -66,7 +66,7 @@ class GajaServerStarter:
         load_env_file()
         
         self.server_root = Path(__file__).parent
-        self.config_file = self.server_root / "server_config.json"
+        self.config_file = self.server_root / "config" / "server_config.json"
         self.log_dir = self.server_root / "logs"
         self.data_dir = self.server_root / "data"
         self.dockerfile_path = self.server_root / "Dockerfile"
@@ -202,7 +202,7 @@ class GajaServerStarter:
         
         # Prepare volume mounts
         volumes = [
-            f"{self.config_file.absolute()}:/app/server_config.json:ro",
+            f"{self.config_file.absolute()}:/app/config/server_config.json:ro",
             f"{self.log_dir.absolute()}:/app/logs",
             f"{self.data_dir.absolute()}:/app/data"
         ]
