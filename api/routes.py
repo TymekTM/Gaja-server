@@ -1138,5 +1138,53 @@ async def habit_import(req: HabitImportRequest):
     habit_engine.import_state(req.data, merge=req.merge)
     return {'imported': True}
 
+
+# ==================== WEB UI ENDPOINTS ====================
+
+@router.get("/admin/dashboard")
+async def get_admin_dashboard():
+    """Get dashboard data for web UI."""
+    if not server_app or not hasattr(server_app, 'web_ui'):
+        raise HTTPException(status_code=503, detail="Web UI not available")
+    
+    return server_app.web_ui.get_dashboard_data()
+
+
+@router.get("/admin/config")
+async def get_admin_config():
+    """Get server configuration."""
+    if not server_app or not hasattr(server_app, 'web_ui'):
+        raise HTTPException(status_code=503, detail="Web UI not available")
+    
+    return server_app.web_ui.get_config_data()
+
+
+@router.get("/admin/plugins")
+async def get_admin_plugins():
+    """Get plugin information."""
+    if not server_app or not hasattr(server_app, 'web_ui'):
+        raise HTTPException(status_code=503, detail="Web UI not available")
+    
+    return server_app.web_ui.get_plugin_data()
+
+
+@router.get("/admin/memory")
+async def get_admin_memory_stats(user_id: str = "1"):
+    """Get memory statistics."""
+    if not server_app or not hasattr(server_app, 'web_ui'):
+        raise HTTPException(status_code=503, detail="Web UI not available")
+    
+    return server_app.web_ui.get_memory_stats(user_id)
+
+
+@router.get("/admin/logs")
+async def get_admin_logs():
+    """Get logs information."""
+    if not server_app or not hasattr(server_app, 'web_ui'):
+        raise HTTPException(status_code=503, detail="Web UI not available")
+    
+    return server_app.web_ui.get_logs_data()
+
+
 # Export router
 __all__ = ["router"]
