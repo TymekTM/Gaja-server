@@ -28,7 +28,7 @@ Gaja is a **self-hosted AI home assistant** designed with a focus on **user-frie
 - **Multi-Provider AI**: Support for OpenAI, Anthropic, LMStudio, Ollama, and more
 
 ### AI Provider Support
-- **OpenAI** (GPT-4.1 models family recomended) with TTS support
+- **OpenAI** (GPT-5 models family recomended) with TTS support
 - **Anthropic**
 - **LMStudio** 
 - **Ollama** 
@@ -140,7 +140,7 @@ The server uses a comprehensive JSON configuration file with the following secti
   },
   "ai": {
     "provider": "openai",
-    "model": "gpt-4",
+    "model": "gpt-5-nano",
     "api_key": "",
     "max_tokens": 1500,
     "temperature": 0.7
@@ -209,7 +209,7 @@ All AI models used **must support function calling** to enable the full feature 
 ### Supported AI Providers
 
 **Fully Tested & Supported:**
-- **OpenAI** (GPT-4.1 models family) - ✅ Function calling, TTS
+- **OpenAI** (GPT-5 models family) - ✅ Function calling, TTS
 - **LMStudio** - ✅ Local models with OpenAI-compatible API
 
 **Compatible (requires verification):**
