@@ -879,36 +879,31 @@ async def generate_response(
         # If using function calling, return the content directly as it should be a natural response
         if use_function_calling and functions and resp.get("tool_calls_executed"):
             # Content is already a natural language response from function calling
-            # Check if it's already JSON formatted, if not wrap it
+            # For function calling responses, we don't need to wrap in JSON again
+            # Just ensure it's properly formatted without double-escaping
+            if not content.strip():
+                content = "I apologize, but I couldn't process that request properly."
+            
+            # Check if content contains our expected JSON structure already
             try:
                 # Try to parse as JSON to see if it's already formatted
                 parsed_content = json.loads(content)
                 if isinstance(parsed_content, dict) and "text" in parsed_content:
                     # It's already a proper JSON response, return as is
                     return content
-                else:
-                    # It's JSON but not in our expected format, wrap it
-                    return json.dumps(
-                        {
-                            "text": content,
-                            "command": "",
-                            "params": {},
-                            "function_calls_executed": True,
-                        },
-                        ensure_ascii=False,
-                    )
             except json.JSONDecodeError:
-                # Content is not JSON, wrap it in our expected format
-                logger.debug(f"Content is not JSON, wrapping: {content[:100]}...")
-                return json.dumps(
-                    {
-                        "text": content,
-                        "command": "",
-                        "params": {},
-                        "function_calls_executed": True,
-                    },
-                    ensure_ascii=False,
-                )
+                pass
+                
+            # Content is a natural language response, wrap it properly
+            # Avoid double-escaping by using json.dumps directly
+            response_data = {
+                "text": content,
+                "command": "",
+                "params": {},
+                "function_calls_executed": True,
+                "tools_used": resp.get("tool_calls_executed", []),
+            }
+            return json.dumps(response_data, ensure_ascii=False)
 
         # Traditional JSON parsing for non-function calling responses
         parsed = extract_json(content)

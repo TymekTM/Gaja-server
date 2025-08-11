@@ -59,7 +59,7 @@ def check_core_files():
         ("f:/Gaja/Gaja-server/ai_module.py", "AI processing module"),
         ("f:/Gaja/Gaja-server/.env", "Environment configuration"),
         ("f:/Gaja/Gaja-Client/client_main.py", "Main client file"),
-        ("f:/Gaja/Gaja-Client/audio_modules/optimized_wakeword_detector.py", "Optimized wake word detector"),
+        ("f:/Gaja/Gaja-Client/audio_modules/wakeword_detector.py", "Unified wake word detector"),
         ("f:/Gaja/Gaja-server/function_calling_system.py", "Function calling system"),
         ("f:/Gaja/Gaja-server/.dockerignore", "Docker ignore file"),
     ]
