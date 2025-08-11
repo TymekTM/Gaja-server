@@ -5,6 +5,7 @@ bazą danych i pluginami."""
 import json
 import os
 import sys
+import time
 from pathlib import Path
 import base64
 from typing import Optional
@@ -69,6 +70,10 @@ except Exception as e:
 
 # Import server components
 from modules.ai_module import AIModule
+from modules.server_performance_monitor import (
+    start_query_tracking, start_server_timer, end_server_timer,
+    record_server_response_data, record_server_error, finish_server_query
+)
 
 # Import API routes
 from api.routes import router as api_router
@@ -131,8 +136,15 @@ class ServerApp:
                     )
                     return
 
+                # Start server performance tracking
+                query_id = f"{user_id}_{int(time.time() * 1000)}"
+                start_query_tracking(query_id, user_id, query)
+                start_server_timer(query_id, "total_server")
+
                 # Przetwórz zapytanie przez AI
                 try:
+                    start_server_timer(query_id, "ai_processing")
+                    
                     # Get conversation history from database
                     history = []
                     if self.db_manager:
@@ -147,6 +159,8 @@ class ServerApp:
                     context["user_id"] = user_id
                     
                     ai_result = await self.ai_module.process_query(query, context)
+                    end_server_timer(query_id, "ai_processing")
+                    
                     logger.info(
                         f"AI module returned result type: {ai_result.get('type', 'unknown')}"
                     )
@@ -162,9 +176,12 @@ class ServerApp:
                         if question:
                             logger.info(f"Generating TTS for clarification: {question[:50]}...")
                             try:
+                                start_server_timer(query_id, "tts_generation")
                                 tts_audio = await self._generate_tts_audio(question)
+                                end_server_timer(query_id, "tts_generation")
                                 logger.info(f"Generated TTS audio for clarification: {len(tts_audio) if tts_audio else 0} bytes")
                             except Exception as e:
+                                end_server_timer(query_id, "tts_generation")
                                 logger.error(f"Failed to generate TTS for clarification: {e}")
                         
                         response_data = {
@@ -184,10 +201,16 @@ class ServerApp:
                             }
                             logger.info("TTS audio encoded and added to clarification response")
                         
+                        # Record performance data
+                        record_server_response_data(query_id, question, len(tts_audio) if tts_audio else None)
+                        
+                        start_server_timer(query_id, "websocket_send")
                         await self.connection_manager.send_to_user(
                             user_id,
                             WebSocketMessage("clarification_request", response_data),
                         )
+                        end_server_timer(query_id, "websocket_send")
+                        finish_server_query(query_id)
                         return
 
                     # Normal AI response
@@ -209,15 +232,23 @@ class ServerApp:
                             text_to_speak = parsed_response["text"]
                             if text_to_speak:
                                 logger.debug("Generating TTS audio...")
+                                start_server_timer(query_id, "tts_generation")
                                 tts_audio = await self._generate_tts_audio(text_to_speak)
+                                end_server_timer(query_id, "tts_generation")
                                 logger.debug(f"Generated TTS audio: {len(tts_audio) if tts_audio else 0} bytes")
                     except json.JSONDecodeError:
                         # Try to use the response directly if it's a simple string
                         if isinstance(response, str) and response.strip():
                             logger.debug("Using response as direct text for TTS")
+                            start_server_timer(query_id, "tts_generation")
                             tts_audio = await self._generate_tts_audio(response.strip())
+                            end_server_timer(query_id, "tts_generation")
                     except Exception as tts_err:
+                        end_server_timer(query_id, "tts_generation")
                         logger.error(f"TTS generation failed: {tts_err}")
+                    
+                    # Record performance data
+                    record_server_response_data(query_id, response, len(tts_audio) if tts_audio else None)
                     
                     # Send AI response with optional TTS audio
                     response_data = {
@@ -237,13 +268,19 @@ class ServerApp:
                     else:
                         logger.info("No TTS audio to include in response")
                     
+                    start_server_timer(query_id, "websocket_send")
                     await self.connection_manager.send_to_user(
                         user_id,
                         WebSocketMessage("ai_response", response_data),
                     )
+                    end_server_timer(query_id, "websocket_send")
+                    end_server_timer(query_id, "total_server")
+                    finish_server_query(query_id)
 
                 except Exception as e:
                     logger.error(f"AI query error for user {user_id}: {e}")
+                    record_server_error(query_id, f"AI query error: {e}")
+                    finish_server_query(query_id)
                     await self.connection_manager.send_to_user(
                         user_id,
                         WebSocketMessage(
