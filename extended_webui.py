@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 """
 Extended Web UI for GAJA Server - FastAPI only implementation
 Provides data for web administration endpoints.
@@ -148,5 +147,3 @@ class ExtendedWebUI:
                 'error': str(e),
                 'timestamp': datetime.now().isoformat()
             }
-=======
->>>>>>> 7307961
