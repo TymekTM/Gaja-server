@@ -14,6 +14,8 @@ import sys
 import time
 from pathlib import Path
 from typing import Dict, Optional
+import hashlib
+from datetime import datetime, timezone
 
 # Minimal imports for startup - full imports happen after dependency check
 try:
@@ -62,17 +64,26 @@ class GajaServerStarter:
     """Main server starter with plug & play functionality."""
     
     def __init__(self):
+        """Initialize starter state and logging."""
         # Load environment variables first
         load_env_file()
-        
+
+        # Core paths
         self.server_root = Path(__file__).parent
         self.config_file = self.server_root / "config" / "server_config.json"
         self.log_dir = self.server_root / "logs"
         self.data_dir = self.server_root / "data"
         self.dockerfile_path = self.server_root / "Dockerfile"
+
+        # Docker image/container naming
         self.docker_image_name = "gaja-server"
         self.docker_container_name = "gaja-server-container"
-        
+
+        # Build image signature labels / policy
+        self.build_signature_label = "GAJA_BUILD_SIG"
+        self.build_timestamp_label = "GAJA_BUILD_TS"
+        self.image_max_age_days = 7  # configurable threshold
+
         # Setup basic logging
         self._setup_logging()
         self.logger = logging.getLogger(__name__)
@@ -127,23 +138,136 @@ class GajaServerStarter:
             return bool(result.stdout.strip())
         except Exception:
             return False
+
+    # -------- Build signature utilities --------
+    def _compute_build_signature(self) -> str:
+        """Compute hash over Dockerfile + requirements + selected config seeds.
+
+        Provides deterministic content-based signature to decide rebuild.
+        """
+        hasher = hashlib.sha256()
+        try:
+            # Dockerfile
+            if self.dockerfile_path.exists():
+                hasher.update(self.dockerfile_path.read_bytes())
+            # requirements file
+            req_file = self.server_root / "requirements_server.txt"
+            if req_file.exists():
+                hasher.update(req_file.read_bytes())
+            # Optional: server_main + start script (light weight change detection)
+            main_file = self.server_root / "server_main.py"
+            if main_file.exists():
+                hasher.update(main_file.read_bytes()[:4096])  # first 4KB
+            # Config template hash impact (structure only)
+            if self.config_file.exists():
+                try:
+                    cfg = json.loads(self.config_file.read_text(encoding='utf-8'))
+                    minimal = {
+                        "ai_model": cfg.get("ai", {}).get("model"),
+                        "features": sorted(list(cfg.get("features", {}).keys()))
+                    }
+                    hasher.update(json.dumps(minimal, sort_keys=True).encode())
+                except Exception:
+                    pass
+        except Exception as e:
+            self.logger.warning(f"Failed computing build signature fallback: {e}")
+        return hasher.hexdigest()[:32]
+
+    def _get_image_labels(self) -> Dict[str,str]:
+        """Return labels for existing image (if any)."""
+        try:
+            result = subprocess.run(
+                ["docker", "inspect", self.docker_image_name, "--format", "{{ json .Config.Labels }}"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                import json as _json
+                return _json.loads(result.stdout.strip()) or {}
+        except Exception:
+            pass
+        return {}
+
+    def _image_age_days(self) -> Optional[float]:
+        try:
+            result = subprocess.run(
+                ["docker", "inspect", self.docker_image_name, "--format", "{{ .Created }}"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode != 0:
+                return None
+            created_raw = result.stdout.strip()
+            # Format: 2025-08-11T12:34:56.123456789Z
+            try:
+                created_dt = datetime.fromisoformat(created_raw.replace('Z','+00:00'))
+            except Exception:
+                return None
+            return (datetime.now(timezone.utc) - created_dt).total_seconds() / 86400.0
+        except Exception:
+            return None
+
+    def needs_image_rebuild(self, *, silent: bool = False) -> bool:
+        """Decide if image should be rebuilt: missing, signature mismatch, or too old.
+
+        Args:
+            silent: if True, suppress per-reason info logs (return decision only)
+        """
+        if not self.docker_image_exists():
+            if not silent:
+                self.logger.info("Docker image absent -> rebuild required")
+            return True
+        current_sig = self._compute_build_signature()
+        labels = self._get_image_labels()
+        stored_sig = labels.get(self.build_signature_label)
+        if stored_sig != current_sig:
+            if not silent:
+                self.logger.info(f"Build signature changed ({stored_sig} -> {current_sig}) -> rebuild")
+            return True
+        age = self._image_age_days()
+        if age is not None and age > self.image_max_age_days:
+            if not silent:
+                self.logger.info(f"Image age {age:.1f}d > {self.image_max_age_days}d -> rebuild")
+            return True
+        if not silent:
+            self.logger.info("Existing Docker image is up-to-date (signature & age ok)")
+        return False
     
-    def build_docker_image(self) -> bool:
-        """Build Docker image if Dockerfile exists."""
+    def build_docker_image(self, force: bool = False) -> bool:
+        """Build Docker image if Dockerfile exists, adding content signature labels.
+
+        Args:
+            force: rebuild even if signature unchanged.
+        """
         if not self.dockerfile_path.exists():
             self.logger.warning("Dockerfile not found, cannot build image")
             return False
-        
-        self.logger.info("Building Docker image...")
+        if not force and not self.needs_image_rebuild(silent=True):
+            self.logger.info("Skipping rebuild; image up-to-date")
+            return True
+
+        self.logger.info("Building Docker image (force=%s)..." % force)
+        build_sig = self._compute_build_signature()
         try:
             result = subprocess.run(
-                ["docker", "build", "-t", self.docker_image_name, "."],
+                [
+                    "docker", "build",
+                    "-t", self.docker_image_name,
+                    "--label", f"{self.build_signature_label}={build_sig}",
+                    "--label", f"{self.build_timestamp_label}={int(time.time())}",
+                    "."
+                ],
                 cwd=self.server_root,
                 check=True,
                 capture_output=True,
-                text=True
+                text=True,
+                encoding="utf-8",
+                errors="replace"
             )
             self.logger.info("Docker image built successfully")
+            self.logger.info(f"Applied build signature: {build_sig}")
             return True
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Failed to build Docker image: {e}")
@@ -426,7 +550,7 @@ class GajaServerStarter:
             
         if command == "build-server":
             self.logger.info("Building Docker image...")
-            if self.build_docker_image():
+            if self.build_docker_image(force=True):
                 self.logger.info("Docker image built successfully")
                 return 0
             else:
@@ -438,10 +562,9 @@ class GajaServerStarter:
             config = self.load_config()
             
             # Check if image exists
-            if not self.docker_image_exists():
-                self.logger.info("Docker image not found, building first...")
+            if self.needs_image_rebuild():
                 if not self.build_docker_image():
-                    self.logger.error("Failed to build Docker image")
+                    self.logger.error("Failed to build/update Docker image")
                     return 1
             
             # Start container
@@ -484,12 +607,16 @@ class GajaServerStarter:
             return 1
     
     async def start_server(self, config: Dict, development: bool = False, use_docker: bool = False):
-        """Start the GAJA server."""
+        """Start the GAJA server with monitoring and health checks."""
         self.logger.info("Starting GAJA Server...")
         
         # If using Docker
         if use_docker and not development:
-            return self.start_docker_container(config)
+            success = self.start_docker_container(config)
+            if success:
+                # Monitor Docker container health
+                await self._monitor_docker_health()
+            return success
         
         # Console mode (development or no Docker)
         # Import server modules after dependencies are installed
@@ -498,7 +625,8 @@ class GajaServerStarter:
             from server_main import app
         except ImportError as e:
             self.logger.error(f"Failed to import server modules: {e}")
-            self.logger.error("Please check if all dependencies are installed")
+            self.logger.error("Please check if all dependencies are installed. If 'psutil' missing run: pip install psutil")
+            # Do not loop: return distinct exit code 2 so wrapper scripts can detect.
             return False
         
         server_config = config.get("server", {})
@@ -507,17 +635,7 @@ class GajaServerStarter:
         
         self.logger.info(f"Server starting on {host}:{port} (console mode)")
         
-        # Configure uvicorn
-        uvicorn_config = {
-            "app": "server_main:app",
-            "host": host,
-            "port": port,
-            "log_level": "info" if not development else "debug",
-            "reload": development,
-            "workers": 1 if development else server_config.get("workers", 1),
-            "access_log": True
-        }
-        
+        # Configure uvicorn with startup monitoring
         try:
             config_obj = uvicorn.Config(
                 app="server_main:app",
@@ -529,12 +647,161 @@ class GajaServerStarter:
                 access_log=True
             )
             server = uvicorn.Server(config_obj)
-            await server.serve()
+            
+            # Start server with health monitoring
+            await self._start_with_monitoring(server, host, port)
+            
         except Exception as e:
             self.logger.error(f"Server startup failed: {e}")
             return False
         
         return True
+    
+    async def _start_with_monitoring(self, server, host: str, port: int):
+        """Start server with health monitoring and auto-restart capability."""
+        import asyncio
+        
+        while True:
+            try:
+                self.logger.info("Starting server process...")
+                
+                # Start server in background task
+                server_task = asyncio.create_task(server.serve())
+                
+                # Wait for server to be ready
+                await self._wait_for_server_ready(host, port, timeout=30)
+                
+                # Start health monitoring
+                health_task = asyncio.create_task(self._monitor_server_health(host, port))
+                
+                # Wait for either server to finish or health check to fail
+                done, pending = await asyncio.wait(
+                    [server_task, health_task],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                
+                # Cancel pending tasks
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                
+                # Check what completed
+                for task in done:
+                    if task == health_task:
+                        self.logger.error("Health check failed, restarting server...")
+                        # Server failed health check, restart
+                        if not server_task.done():
+                            server_task.cancel()
+                            try:
+                                await server_task
+                            except asyncio.CancelledError:
+                                pass
+                        
+                        # Wait before restart
+                        await asyncio.sleep(5)
+                        break
+                    elif task == server_task:
+                        # Server finished normally or with error
+                        result = task.result() if not task.exception() else None
+                        if task.exception():
+                            self.logger.error(f"Server crashed: {task.exception()}")
+                            await asyncio.sleep(10)  # Wait longer after crash
+                        else:
+                            self.logger.info("Server shutdown normally")
+                            return
+                        break
+                        
+            except KeyboardInterrupt:
+                self.logger.info("Server stopped by user")
+                return
+            except Exception as e:
+                self.logger.error(f"Unexpected error in server monitoring: {e}")
+                await asyncio.sleep(15)  # Wait before retry
+    
+    async def _wait_for_server_ready(self, host: str, port: int, timeout: int = 30):
+        """Wait for server to be ready to accept connections."""
+        import asyncio
+        import aiohttp
+        
+        url = f"http://{host}:{port}/health"
+        start_time = asyncio.get_event_loop().time()
+        
+        while (asyncio.get_event_loop().time() - start_time) < timeout:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as response:
+                        if response.status == 200:
+                            self.logger.info("Server is ready and responding to health checks")
+                            return
+            except Exception:
+                pass
+            
+            await asyncio.sleep(1)
+        
+        self.logger.warning(f"Server did not respond to health checks within {timeout} seconds")
+    
+    async def _monitor_server_health(self, host: str, port: int):
+        """Monitor server health and raise exception if unhealthy."""
+        import asyncio
+        import aiohttp
+        
+        url = f"http://{host}:{port}/health"
+        consecutive_failures = 0
+        max_failures = 3
+        check_interval = 30  # seconds
+        
+        # Wait a bit before starting health checks
+        await asyncio.sleep(10)
+        
+        while True:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as response:
+                        if response.status == 200:
+                            consecutive_failures = 0
+                            self.logger.debug("Health check passed")
+                        else:
+                            consecutive_failures += 1
+                            self.logger.warning(f"Health check returned status {response.status}")
+                            
+            except Exception as e:
+                consecutive_failures += 1
+                self.logger.warning(f"Health check failed: {e}")
+            
+            if consecutive_failures >= max_failures:
+                self.logger.error(f"Health check failed {consecutive_failures} consecutive times")
+                raise Exception("Server health check failed")
+            
+            await asyncio.sleep(check_interval)
+    
+    async def _monitor_docker_health(self):
+        """Monitor Docker container health."""
+        import asyncio
+        
+        while True:
+            try:
+                status = self.get_container_status()
+                if "running" not in status.lower():
+                    self.logger.error(f"Container not running: {status}")
+                    break
+                
+                # Also check HTTP health endpoint
+                try:
+                    if requests:
+                        response = requests.get("http://localhost:8001/health", timeout=5)
+                        if response.status_code != 200:
+                            self.logger.warning(f"Container health endpoint returned {response.status_code}")
+                except Exception as e:
+                    self.logger.warning(f"Could not check container health endpoint: {e}")
+                
+                await asyncio.sleep(30)  # Check every 30 seconds
+                
+            except Exception as e:
+                self.logger.error(f"Error monitoring Docker container: {e}")
+                await asyncio.sleep(60)  # Wait longer on error
     
     def print_startup_info(self, config: Dict, use_docker: bool = False, development: bool = False):
         """Print startup information."""
@@ -603,7 +870,12 @@ class GajaServerStarter:
                     use_docker = True
                     self.logger.info("Docker forced by --docker flag")
                     # Check and build image if needed
-                    if not self.docker_image_exists():
+                    if args.force_rebuild:
+                        self.logger.info("--force-rebuild specified: rebuilding image")
+                        if not self.build_docker_image(force=True):
+                            self.logger.error("Forced Docker build failed")
+                            return 1
+                    elif not self.docker_image_exists():
                         self.logger.info("Docker image not found, building...")
                         if not self.build_docker_image():
                             self.logger.error("Docker build failed")
@@ -618,15 +890,17 @@ class GajaServerStarter:
                 if self.is_docker_available():
                     use_docker = True
                     self.logger.info("Docker available, checking image...")
-                    if not self.docker_image_exists():
-                        self.logger.info("Docker image not found, building...")
+                    if args.force_rebuild:
+                        self.logger.info("--force-rebuild specified: rebuilding image")
+                        if not self.build_docker_image(force=True):
+                            self.logger.error("Forced Docker build failed")
+                            return 1
+                    elif self.needs_image_rebuild():
                         if not self.build_docker_image():
                             self.logger.warning("Docker build failed, falling back to console mode")
                             use_docker = False
                         else:
-                            self.logger.info("Docker image built successfully")
-                    else:
-                        self.logger.info("Docker image found")
+                            self.logger.info("Docker image (re)built successfully")
                 else:
                     self.logger.info("Docker not available, using console mode")
         else:
@@ -742,6 +1016,12 @@ Docker modes:
         "--no-docker",
         action="store_true", 
         help="Force console mode (disable Docker)"
+    )
+
+    parser.add_argument(
+        "--force-rebuild",
+        action="store_true",
+        help="Force Docker image rebuild regardless of signature/age"
     )
     
     args = parser.parse_args()

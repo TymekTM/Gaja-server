@@ -219,7 +219,7 @@ class GAJAServerApp(BaseServerApp):
         if tts_audio:
             response_data["tts_audio"] = base64.b64encode(tts_audio).decode('utf-8')
             tts_config = self.config.get("tts", {}) if self.config else {}
-            response_data["tts_config"] = {"volume": tts_config.get("volume", 1.0)}
+            response_data["tts_config"] = {"volume": tts_config.get("volume", 1.0), "tts_metadata": {"format": "mp3"}}
         
         record_server_response_data(query_id, question, len(tts_audio) if tts_audio else None)
         
@@ -258,7 +258,7 @@ class GAJAServerApp(BaseServerApp):
         if tts_audio:
             response_data["tts_audio"] = base64.b64encode(tts_audio).decode('utf-8')
             tts_config = self.config.get("tts", {}) if self.config else {}
-            response_data["tts_config"] = {"volume": tts_config.get("volume", 1.0)}
+            response_data["tts_config"] = {"volume": tts_config.get("volume", 1.0), "tts_metadata": {"format": "mp3"}}
         
         start_server_timer(query_id, "websocket_send")
         await self.connection_manager.send_to_user(
@@ -425,8 +425,8 @@ class GAJAServerApp(BaseServerApp):
             
             # Get TTS configuration
             tts_config = self.config.get("tts", {}) if self.config else {}
-            model = tts_config.get("model", "tts-1")
-            voice = tts_config.get("voice", "nova")
+            model = "gpt-4o-mini-tts"
+            voice = "sage"
             speed = tts_config.get("speed", 1.0)
             
             # Generate speech

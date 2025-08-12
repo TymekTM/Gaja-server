@@ -18,6 +18,11 @@ class ExtendedWebUI:
         """Initialize web UI with configuration and database manager."""
         self.config_loader = config_loader
         self.db_manager = db_manager
+        self.server_app = None
+    
+    def set_server_app(self, server_app):
+        """Set reference to server app instance."""
+        self.server_app = server_app
         
     def get_dashboard_data(self) -> Dict[str, Any]:
         """Get dashboard data."""

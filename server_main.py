@@ -197,7 +197,8 @@ class ServerApp:
                             # Add TTS configuration for client
                             tts_config = self.config.get("tts", {}) if self.config else {}
                             response_data["tts_config"] = {
-                                "volume": tts_config.get("volume", 1.0)
+                                "volume": tts_config.get("volume", 1.0),
+                                "tts_metadata": {"format": "mp3"}
                             }
                             logger.info("TTS audio encoded and added to clarification response")
                         
@@ -262,7 +263,8 @@ class ServerApp:
                         # Add TTS configuration for client
                         tts_config = self.config.get("tts", {}) if self.config else {}
                         response_data["tts_config"] = {
-                            "volume": tts_config.get("volume", 1.0)
+                            "volume": tts_config.get("volume", 1.0),
+                            "tts_metadata": {"format": "mp3"}
                         }
                         logger.info("TTS audio encoded and added to response")
                     else:
@@ -578,8 +580,9 @@ class ServerApp:
             
             # Get TTS configuration from config or use defaults
             tts_config = self.config.get("tts", {}) if self.config else {}
-            model = tts_config.get("model", "tts-1")  # tts-1 or tts-1-hd
-            voice = tts_config.get("voice", "nova")   # alloy, echo, fable, onyx, nova, shimmer
+            # Standardize to gpt-4o-mini-tts and voice sage
+            model = "gpt-4o-mini-tts"
+            voice = "sage"
             speed = tts_config.get("speed", 1.0)      # 0.25 to 4.0
             volume = tts_config.get("volume", 1.0)    # Will be used by client for playback
             
