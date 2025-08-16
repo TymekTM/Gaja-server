@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from auth.security import security_manager
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
@@ -52,7 +52,8 @@ class LoginRequest(BaseModel):
 
 class LoginResponse(BaseModel):
     success: bool
-    token: str
+    token: str  # access token
+    refreshToken: str
     user: dict[str, Any]
 
 
@@ -115,8 +116,25 @@ class ApiResponse(BaseModel):
     message: str | None = None
 
 
-# Bezpieczni użytkownicy - hasła są zahashowane
+# ===== Additional models for integrations / models listing =====
+class ModelInfo(BaseModel):
+    id: str
+    name: str
+    type: str = "llm"
+    size: str | None = None
+    loaded: bool = True
+    parameters: dict[str, Any] | None = None
 
+
+class IntegrationInfo(BaseModel):
+    name: str
+    displayName: str
+    connected: bool
+    connectedAt: str | None = None
+    config: dict[str, Any] | None = None
+
+
+# Bezpieczni użytkownicy - hasła są zahashowane
 # Przykładowi użytkownicy z zahashowanymi hasłami
 # UWAGA: W produkcji należy używać zewnętrznej bazy danych z właściwą migracją
 SECURE_USERS = {
@@ -201,8 +219,11 @@ def optional_auth(
 
 
 # Auth endpoints
+REFRESH_TOKENS: dict[str, dict[str, Any]] = {}
+
+
 @router.post("/auth/login")
-async def login(request: LoginRequest) -> LoginResponse:
+async def login(request: LoginRequest, fastapi_request: Request) -> dict[str, Any]:
     """Secure user login endpoint with proper authentication."""
     try:
         email = request.email.lower().strip()
@@ -244,30 +265,41 @@ async def login(request: LoginRequest) -> LoginResponse:
             "role": user["role"],
         }
         access_token = security_manager.create_access_token(token_data)
-        # refresh_token = security_manager.create_refresh_token(token_data)
+        refresh_token = security_manager.create_refresh_token(token_data)
+
+        # Store refresh token (simple in-memory store; replace with DB in production)
+        REFRESH_TOKENS[refresh_token] = {
+            "user_id": user["id"],
+            "email": user["email"],
+            "role": user["role"],
+            "created_at": datetime.now().isoformat(),
+        }
 
         # Loguj udane logowanie (bez wrażliwych danych)
+        client_ip = fastapi_request.client.host if fastapi_request and fastapi_request.client else "unknown"
         log_data = security_manager.sanitize_log_data(
             {
                 "email": email,
                 "user_id": user["id"],
                 "role": user["role"],
-                "ip": request.client.host if hasattr(request, "client") and request.client else "unknown",
+                "ip": client_ip,
             }
         )
         logger.info(f"Successful login: {log_data}")
 
-        return LoginResponse(
-            success=True,
-            token=access_token,
-            user={
+        # Return explicit dict to avoid any potential serialization issues omitting refreshToken
+        return {
+            "success": True,
+            "token": access_token,
+            "refreshToken": refresh_token,
+            "user": {
                 "id": user["id"],
                 "email": user["email"],
                 "role": user["role"],
                 "settings": user["settings"],
                 "createdAt": user["created_at"],
             },
-        )
+        }
 
     except HTTPException:
         raise
@@ -284,10 +316,35 @@ async def magic_link(request: dict[str, str]) -> ApiResponse:
     email = request.get("email")
     if not email:
         raise HTTPException(status_code=400, detail="Email required")
-
-    # Mock magic link sending
     logger.info(f"Magic link sent to {email}")
     return ApiResponse(success=True, message="Magic link sent")
+
+@router.post("/auth/refresh")
+async def refresh_token_route(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict[str, Any]:
+    """Issue a new access token given a valid refresh token in Authorization header."""
+    try:
+        refresh_token = credentials.credentials
+        # Verify token structure & type using security_manager (will raise if invalid)
+        payload = security_manager.verify_token(refresh_token, "refresh")
+
+        # Optionally check in-memory store (defence-in-depth)
+        if refresh_token not in REFRESH_TOKENS:
+            raise HTTPException(status_code=401, detail="Unknown refresh token")
+
+        token_data = {
+            "userId": payload.get("userId"),
+            "email": payload.get("email"),
+            "role": payload.get("role"),
+        }
+        new_access = security_manager.create_access_token(token_data)
+        return {"token": new_access}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Refresh token error: {e}")
+        raise HTTPException(status_code=401, detail="Invalid refresh token") from e
+
+    # (function body moved above)
 
 
 @router.get("/me")
@@ -421,19 +478,16 @@ async def get_plugins(
         else:
             # Fallback to global plugin_manager
             user_plugins = plugin_manager.get_user_plugins(current_user["id"])
-
             for plugin_name, plugin_info in plugin_manager.plugins.items():
-                plugins.append(
-                    Plugin(
-                        slug=plugin_name,
-                        name=plugin_info.name,
-                        version=plugin_info.version,
-                        enabled=user_plugins.get(plugin_name, False),
-                        author=plugin_info.author,
-                        description=plugin_info.description,
-                        installedAt=datetime.now().isoformat(),
-                    )
-                )
+                plugins.append(Plugin(
+                    slug=plugin_name,
+                    name=plugin_info.name,
+                    version=plugin_info.version,
+                    enabled=user_plugins.get(plugin_name, False),
+                    author=plugin_info.author,
+                    description=plugin_info.description,
+                    installedAt=datetime.now().isoformat(),
+                ))
 
         return plugins
 
@@ -449,47 +503,125 @@ async def toggle_plugin(
     current_user: dict[str, Any] = Depends(get_current_user),
 ) -> Plugin:
     """Toggle plugin enabled status."""
+    enabled = request.get("enabled", False)
+    user_id = current_user["id"]
+    if not server_app or not hasattr(server_app, "plugin_manager"):
+        raise HTTPException(status_code=503, detail="Plugin manager unavailable")
+    pm = server_app.plugin_manager
     try:
-        enabled = request.get("enabled", False)
-        user_id = current_user["id"]
-
-        if hasattr(server_app, "plugin_manager"):
-            pm = server_app.plugin_manager
-
-            if enabled:
-                success = await pm.enable_plugin_for_user(user_id, plugin_slug)
-            else:
-                success = await pm.disable_plugin_for_user(user_id, plugin_slug)
-
-            if not success:
-                raise HTTPException(status_code=400, detail="Failed to toggle plugin")
-
-            # Update database
-            if hasattr(server_app, "db_manager"):
-                await server_app.db_manager.update_user_plugin_status(
-                    user_id, plugin_slug, enabled
-                )
-
-            # Return updated plugin info
-            plugin_info = pm.plugins.get(plugin_slug)
-            if plugin_info:
-                return Plugin(
-                    slug=plugin_slug,
-                    name=plugin_info.name,
-                    version=plugin_info.version,
-                    enabled=enabled,
-                    author=plugin_info.author,
-                    description=plugin_info.description,
-                    installedAt=datetime.now().isoformat(),
-                )
-
-        raise HTTPException(status_code=404, detail="Plugin not found")
-
+        if enabled:
+            success = await pm.enable_plugin_for_user(user_id, plugin_slug)
+        else:
+            success = await pm.disable_plugin_for_user(user_id, plugin_slug)
+        if not success:
+            raise HTTPException(status_code=400, detail="Failed to toggle plugin")
+        # DB update (optional)
+        if hasattr(server_app, "db_manager") and server_app.db_manager:
+            try:
+                await server_app.db_manager.update_user_plugin_status(user_id, plugin_slug, enabled)
+            except Exception as db_err:
+                logger.warning(f"DB plugin status update failed: {db_err}")
+        plugin_info = pm.plugins.get(plugin_slug)
+        if not plugin_info:
+            raise HTTPException(status_code=404, detail="Plugin not found")
+        return Plugin(
+            slug=plugin_slug,
+            name=plugin_info.name,
+            version=plugin_info.version,
+            enabled=enabled,
+            author=plugin_info.author,
+            description=plugin_info.description,
+            installedAt=datetime.now().isoformat(),
+        )
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Toggle plugin error: {e}")
         raise HTTPException(status_code=500, detail="Failed to toggle plugin") from e
+# Additional endpoints (formerly misplaced inside plugin toggle)
+@router.post("/plugins")
+async def upload_plugin(file: UploadFile = File(...), current_user: dict[str, Any] = Depends(get_current_user)) -> Plugin:
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    try:
+        contents = await file.read()
+        size_kb = len(contents) / 1024
+        logger.info(f"Received plugin upload {file.filename} size={size_kb:.1f}KB")
+        return Plugin(
+            slug=(file.filename or "uploaded").replace('.zip',''),
+            name=file.filename or "uploaded.zip",
+            version="0.0.1",
+            enabled=False,
+            author="upload",
+            description="Uploaded plugin (placeholder)",
+            installedAt=datetime.now().isoformat(),
+        )
+    except Exception as e:
+        logger.error(f"Plugin upload error: {e}")
+        raise HTTPException(status_code=500, detail="Plugin upload failed") from e
+
+@router.get("/models")
+async def list_models(current_user: dict[str, Any] = Depends(get_current_user)) -> list[ModelInfo]:
+    return [ModelInfo(id="default-llm", name="Default LLM", size="medium", loaded=True, parameters={"temperature":0.7})]
+
+@router.post("/models/reload")
+async def reload_models(current_user: dict[str, Any] = Depends(get_current_user)) -> ApiResponse:
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return ApiResponse(success=True, message="Models reloaded")
+
+@router.post("/backup")
+async def create_backup(current_user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    filename = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+    logger.info(f"Creating placeholder backup {filename}")
+    return {"filename": filename}
+
+@router.post("/restore")
+async def restore_backup(file: UploadFile = File(...), current_user: dict[str, Any] = Depends(get_current_user)) -> ApiResponse:
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    try:
+        await file.read()
+        logger.info(f"Received backup restore file {file.filename}")
+        return ApiResponse(success=True, message="Backup restored (placeholder)")
+    except Exception as e:
+        logger.error(f"Restore error: {e}")
+        raise HTTPException(status_code=500, detail="Restore failed") from e
+
+INTEGRATIONS: dict[str, dict[str, Any]] = {
+    "google": {"displayName": "Google", "connected": False},
+    "slack": {"displayName": "Slack", "connected": False},
+}
+
+@router.get("/integrations")
+async def list_integrations(current_user: dict[str, Any] = Depends(get_current_user)) -> list[IntegrationInfo]:
+    out: list[IntegrationInfo] = []
+    for key, val in INTEGRATIONS.items():
+        info = val.copy()
+        out.append(IntegrationInfo(name=key, displayName=info.get("displayName", key.title()), connected=info.get("connected", False), connectedAt=info.get("connectedAt"), config=info.get("config")))
+    return out
+
+@router.post("/integrations/{name}/link")
+async def link_integration(name: str, current_user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    integ = INTEGRATIONS.get(name)
+    if not integ:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    integ["connected"] = True
+    integ["connectedAt"] = datetime.now().isoformat()
+    integ["config"] = {"scopes": ["basic"], "mock": True}
+    return {"authUrl": f"https://auth.example.com/{name}?token=mock"}
+
+@router.delete("/integrations/{name}")
+async def unlink_integration(name: str, current_user: dict[str, Any] = Depends(get_current_user)) -> ApiResponse:
+    integ = INTEGRATIONS.get(name)
+    if not integ:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    integ["connected"] = False
+    integ.pop("connectedAt", None)
+    integ.pop("config", None)
+    return ApiResponse(success=True, message="Integration unlinked")
 
 
 # System metrics endpoints

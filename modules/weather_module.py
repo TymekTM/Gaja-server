@@ -8,6 +8,13 @@ from .api_module import get_api_module
 
 logger = logging.getLogger(__name__)
 
+# Plugin metadata
+PLUGIN_NAME = "weather_module"
+PLUGIN_DESCRIPTION = "Weather information and forecasts"
+PLUGIN_VERSION = "1.0.0"
+PLUGIN_AUTHOR = "GAJA Team"
+PLUGIN_DEPENDENCIES = []
+
 
 # Required plugin functions
 def get_functions() -> list[dict[str, Any]]:
@@ -856,6 +863,200 @@ class WeatherModule:
             "forecast": forecast,
             "units": {"temperature": "°C", "wind_speed": "m/s", "precipitation": "mm"},
         }
+
+    async def get_forecast(self, user_id: int, location: str, days: int = 3, api_key: str | None = None, provider: str = "openweather") -> dict[str, Any]:
+        """Pobiera prognozę pogody na kilka dni."""
+        if not self.api_module:
+            await self.initialize()
+
+        if not api_key:
+            api_key = await self._get_user_api_key(user_id, provider)
+            if not api_key:
+                # Zwróć mock dane
+                return self._get_mock_forecast_data(location, days)
+
+        try:
+            # OpenWeatherMap 5 day forecast
+            url = "https://api.openweathermap.org/data/2.5/forecast"
+            params = {
+                "q": location,
+                "appid": api_key,
+                "units": "metric",
+                "lang": "pl",
+                "cnt": days * 8,  # 8 prognoz na dzień (co 3 godziny)
+            }
+
+            response = await self.api_module.get(user_id, url, params=params)
+
+            if response.get("status") != 200:
+                return {
+                    "error": "Błąd pobierania prognozy pogody",
+                    "details": response,
+                    "provider": "openweather",
+                }
+
+            data = response.get("data", {})
+            forecast_info = self._process_forecast_data(data, location, days)
+            forecast_info["provider"] = "openweather"
+            forecast_info["timestamp"] = datetime.now().isoformat()
+
+            # Zapisz do cache
+            cache_key = f"forecast_{location.lower()}_{days}"
+            self.weather_cache[cache_key] = (forecast_info, datetime.now())
+
+            return forecast_info
+
+        except Exception as e:
+            logger.error(f"Error getting forecast for {location}: {e}")
+            return {
+                "error": f"Błąd pobierania prognozy pogody: {str(e)}",
+                "provider": "openweather",
+            }
+
+    def _process_forecast_data(self, data: dict[str, Any], location: str, days: int) -> dict[str, Any]:
+        """Przetwarza dane prognozy z OpenWeatherMap."""
+        forecasts = data.get("list", [])
+        city_info = data.get("city", {})
+
+        # Grupuj prognozy według dni
+        daily_forecasts = {}
+        for forecast in forecasts:
+            date = datetime.fromtimestamp(forecast["dt"]).date()
+            date_str = date.strftime("%Y-%m-%d")
+
+            if date_str not in daily_forecasts:
+                daily_forecasts[date_str] = []
+
+            daily_forecasts[date_str].append({
+                "time": datetime.fromtimestamp(forecast["dt"]).strftime("%H:%M"),
+                "temperature": round(forecast["main"]["temp"]),
+                "description": forecast["weather"][0]["description"],
+                "icon": forecast["weather"][0]["icon"],
+                "humidity": forecast["main"]["humidity"],
+                "wind_speed": round(forecast["wind"]["speed"], 1),
+                "precipitation": round(
+                    forecast.get("rain", {}).get("3h", 0) + forecast.get("snow", {}).get("3h", 0), 1
+                ),
+            })
+
+        # Przetwórz dane dzienne
+        forecast = []
+        for date_str, day_data in list(daily_forecasts.items())[:days]:
+            date = datetime.strptime(date_str, "%Y-%m-%d").date()
+
+            # Oblicz średnie wartości
+            temps = [item["temperature"] for item in day_data]
+            humidities = [item["humidity"] for item in day_data]
+            precipitations = [item["precipitation"] for item in day_data]
+
+            forecast.append({
+                "date": date_str,
+                "day_name": ["Poniedziałek", "Wtorek", "Środa", "Czwartek", "Piątek", "Sobota", "Niedziela"][date.weekday()],
+                "min_temp": min(temps) if temps else 0,
+                "max_temp": max(temps) if temps else 0,
+                "avg_temp": round(sum(temps) / len(temps)) if temps else 0,
+                "description": day_data[len(day_data) // 2]["description"] if day_data else "",
+                "icon": day_data[len(day_data) // 2]["icon"] if day_data else "",
+                "avg_humidity": round(sum(humidities) / len(humidities)) if humidities else 0,
+                "avg_wind_speed": round(sum([item["wind_speed"] for item in day_data]) / len(day_data), 1) if day_data else 0,
+                "total_precipitation": round(sum(precipitations), 1) if precipitations else 0,
+                "hourly": day_data[:8],  # Maksymalnie 8 godzin na dzień
+            })
+
+        return {
+            "location": {
+                "name": city_info.get("name", location),
+                "country": city_info.get("country", ""),
+                "latitude": city_info.get("coord", {}).get("lat"),
+                "longitude": city_info.get("coord", {}).get("lon"),
+            },
+            "forecast": forecast,
+            "units": {"temperature": "°C", "wind_speed": "m/s", "precipitation": "mm"},
+        }
+
+    async def execute_function(self, function_name: str, parameters: dict[str, Any], user_id: int = 1) -> dict[str, Any]:
+        """Wykonuje funkcję modułu weather."""
+        try:
+            if function_name == "get_weather":
+                location = parameters.get("location")
+                if not location:
+                    return {
+                        "success": False,
+                        "error": "Brak wymaganego parametru: location",
+                    }
+                
+                provider = parameters.get("provider", "openweather")
+                test_mode = parameters.get("test_mode", False)
+
+                # Sprawdź czy jest tryb testowy lub brak klucza API
+                api_key = await self._get_user_api_key(user_id, provider)
+                if not api_key or test_mode:
+                    # Zwróć mock dane
+                    mock_data = self._get_mock_weather_data(location)
+                    return {
+                        "success": True,
+                        "data": mock_data,
+                        "message": f"Pobrano dane pogodowe dla {location} (tryb testowy)",
+                        "test_mode": True,
+                    }
+
+                result = await self.get_weather(user_id, location, api_key, provider)
+                return {
+                    "success": True,
+                    "data": result,
+                    "message": f"Pobrano dane pogodowe dla {location}",
+                }
+
+            elif function_name == "get_forecast":
+                location = parameters.get("location")
+                if not location:
+                    return {
+                        "success": False,
+                        "error": "Brak wymaganego parametru: location",
+                    }
+                
+                days = parameters.get("days", 3)
+                if isinstance(days, str):
+                    try:
+                        days = int(days)
+                    except ValueError:
+                        days = 3
+                        
+                provider = parameters.get("provider", "openweather")
+                test_mode = parameters.get("test_mode", False)
+
+                # Sprawdź czy jest tryb testowy lub brak klucza API
+                api_key = await self._get_user_api_key(user_id, provider)
+                if not api_key or test_mode:
+                    # Zwróć mock dane prognozy
+                    mock_data = self._get_mock_forecast_data(location, days)
+                    return {
+                        "success": True,
+                        "data": mock_data,
+                        "message": f"Pobrano prognozę pogody dla {location} na {days} dni (tryb testowy)",
+                        "test_mode": True,
+                    }
+
+                result = await self.get_forecast(user_id, location, days, api_key, provider)
+                return {
+                    "success": True,
+                    "data": result,
+                    "message": f"Pobrano prognozę pogody dla {location} na {days} dni",
+                }
+
+            else:
+                return {
+                    "success": False,
+                    "error": f"Nieznana funkcja: {function_name}",
+                    "available_functions": ["get_weather", "get_forecast"],
+                }
+
+        except Exception as e:
+            logger.error(f"Error executing weather function {function_name}: {e}")
+            return {
+                "success": False,
+                "error": f"Błąd podczas wykonywania funkcji {function_name}: {str(e)}",
+            }
 
 
 # Globalna instancja

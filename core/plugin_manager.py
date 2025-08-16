@@ -40,6 +40,12 @@ class PluginManager:
             self.plugins_directory = current_file_dir / plugins_directory
         else:
             self.plugins_directory = Path(plugins_directory)
+        
+        logger.info(f"Plugin Manager initialized with directory: {self.plugins_directory}")
+        logger.info(f"Directory exists: {self.plugins_directory.exists()}")
+        if self.plugins_directory.exists():
+            py_files = list(self.plugins_directory.glob("*.py"))
+            logger.info(f"Found {len(py_files)} .py files: {[f.name for f in py_files]}")
 
         self.plugins: dict[str, PluginInfo] = {}
         self.user_plugins: dict[
@@ -58,11 +64,15 @@ class PluginManager:
             for file_path in self.plugins_directory.glob("*.py"):
                 if file_path.name.startswith("__"):
                     continue
-
+                
+                logger.info(f"Analyzing plugin file: {file_path}")
                 plugin_info = await self._analyze_plugin(file_path)
                 if plugin_info:
                     discovered.append(plugin_info)
                     self.plugins[plugin_info.name] = plugin_info
+                    logger.info(f"Successfully analyzed plugin: {plugin_info.name}")
+                else:
+                    logger.warning(f"Failed to analyze plugin: {file_path}")
 
             logger.info(f"Discovered {len(discovered)} plugins")
             return discovered
@@ -448,4 +458,4 @@ class PluginManager:
 
 
 # Global plugin manager instance
-plugin_manager = PluginManager("modules")
+plugin_manager = PluginManager("../modules")

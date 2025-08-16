@@ -56,12 +56,14 @@ class FunctionCallingSystem:
         try:
             from core.plugin_manager import plugin_manager
 
+            logger.info(f"Plugin manager function registry has {len(plugin_manager.function_registry)} functions")
             if plugin_manager.function_registry:
                 # Get functions from plugin manager's function registry
                 for (
                     full_func_name,
                     func_info,
                 ) in plugin_manager.function_registry.items():
+                    logger.info(f"Processing function: {full_func_name}")
                     try:
                         # Parse plugin name and function name
                         parts = full_func_name.split(".")

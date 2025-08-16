@@ -7,6 +7,13 @@ from .api_module import get_api_module
 
 logger = logging.getLogger(__name__)
 
+# Plugin metadata
+PLUGIN_NAME = "search_module"
+PLUGIN_DESCRIPTION = "Internet search functionality"
+PLUGIN_VERSION = "1.0.0"
+PLUGIN_AUTHOR = "GAJA Team"
+PLUGIN_DEPENDENCIES = []
+
 
 # Required plugin functions
 def get_functions() -> list[dict[str, Any]]:
@@ -737,6 +744,81 @@ class SearchModule:
             "language": "pl",
             "test_mode": True,
         }
+
+    async def execute_function(self, function_name: str, parameters: dict[str, Any], user_id: int = 1) -> dict[str, Any]:
+        """Wykonuje funkcję modułu search."""
+        try:
+            if function_name == "search":
+                query = parameters.get("query")
+                if not query:
+                    return {
+                        "success": False,
+                        "error": "Brak wymaganego parametru: query",
+                    }
+                
+                engine = parameters.get("engine", "duckduckgo")
+                max_results = parameters.get("max_results", 10)
+                test_mode = parameters.get("test_mode", False)
+
+                if test_mode:
+                    # Zwróć mock dane
+                    mock_data = self._get_mock_search_data(query, max_results)
+                    return {
+                        "success": True,
+                        "data": mock_data,
+                        "message": f"Wyszukano '{query}' (tryb testowy)",
+                        "test_mode": True,
+                    }
+
+                result = await self.search(user_id, query, engine, max_results)
+                return {
+                    "success": True,
+                    "data": result,
+                    "message": f"Wyszukano '{query}' w {engine}",
+                }
+
+            elif function_name == "search_news":
+                query = parameters.get("query")
+                if not query:
+                    return {
+                        "success": False,
+                        "error": "Brak wymaganego parametru: query",
+                    }
+                
+                max_results = parameters.get("max_results", 10)
+                language = parameters.get("language", "pl")
+                test_mode = parameters.get("test_mode", False)
+
+                if test_mode:
+                    # Zwróć mock dane
+                    mock_data = self._get_mock_news_data(query, max_results)
+                    return {
+                        "success": True,
+                        "data": mock_data,
+                        "message": f"Wyszukano wiadomości o '{query}' (tryb testowy)",
+                        "test_mode": True,
+                    }
+
+                result = await self.search_news(user_id, query, max_results, language)
+                return {
+                    "success": True,
+                    "data": result,
+                    "message": f"Wyszukano wiadomości o '{query}'",
+                }
+
+            else:
+                return {
+                    "success": False,
+                    "error": f"Nieznana funkcja: {function_name}",
+                    "available_functions": ["search", "search_news"],
+                }
+
+        except Exception as e:
+            logger.error(f"Error executing search function {function_name}: {e}")
+            return {
+                "success": False,
+                "error": f"Błąd podczas wykonywania funkcji {function_name}: {str(e)}",
+            }
 
 
 # Globalna instancja
