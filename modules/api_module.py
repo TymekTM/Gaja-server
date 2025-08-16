@@ -208,7 +208,7 @@ class APIModule:
         user_id: int,
         user_api_key: str,
         messages: list[dict[str, str]],
-        model: str = "gpt-4.1-nano",
+    model: str = "gpt-5-nano",
         **kwargs,
     ) -> dict[str, Any]:
         """Wywołuje OpenAI API.

@@ -61,7 +61,9 @@ def create_default_config() -> dict[str, Any]:
         "database": {"url": "sqlite:///./server_data.db", "echo": False},
         "ai": {
             "provider": "openai",
-            "model": "gpt-4.1-nano",
+            # Domyślny model zaktualizowany do gpt-5-nano (wcześniej gpt-4.1-nano)
+            # Jeśli chcesz wymusić inny model ustaw zmienną środowiskową GAJA_AI_MODEL
+            "model": "gpt-5-nano",
             "temperature": 0.7,
             "max_tokens": 1000,
         },
@@ -92,21 +94,35 @@ class ConfigLoader:
         return self._config
 
     def get_config(self) -> dict[str, Any]:
-        """Pobierz aktualną konfigurację."""
+        """Pobierz aktualną konfigurację.
+
+        Zawsze zwraca dict – jeśli _config jest None, ładuje ponownie.
+        """
         if self._config is None:
             self.load()
-        return self._config
+        # Defensive fallback
+        if self._config is None:
+            self._config = create_default_config()
+        return self._config  # type: ignore[return-value]
 
-    def save_config(self, config: dict[str, Any] = None):
-        """Zapisz konfigurację."""
+    def save_config(self, config: dict[str, Any] | None = None):
+        """Zapisz konfigurację.
+
+        Args:
+            config: Opcjonalnie nowy obiekt konfiguracji
+        """
         if config is not None:
             self._config = config
+        if self._config is None:
+            self._config = create_default_config()
         save_config(self._config, self.config_file)
 
     def update_config(self, updates: dict[str, Any]):
         """Aktualizuj konfigurację."""
         if self._config is None:
             self.load()
+        if self._config is None:  # still None -> create default
+            self._config = create_default_config()
         self._config.update(updates)
         self.save_config()
 
@@ -114,12 +130,29 @@ class ConfigLoader:
         """Pobierz wartość z konfiguracji."""
         if self._config is None:
             self.load()
+        if self._config is None:
+            self._config = create_default_config()
         return self._config.get(key, default)
 
 
 # Stare zmienne dla kompatybilności
 _config = load_config()
 STT_MODEL = _config.get("ai", {}).get("stt_model", "base")
-MAIN_MODEL = _config.get("ai", {}).get("model", "gpt-4.1-nano")
+# Pozwól nadpisać model zmienną środowiskową GAJA_AI_MODEL
+_env_model = os.environ.get("GAJA_AI_MODEL")
+_configured_model = _config.get("ai", {}).get("model", "gpt-5-nano")
+
+# Backward compatibility: jeśli ktoś nadal ma stary wpis w configu "gpt-4.1-nano" zmieniamy na nowy
+if _configured_model == "gpt-4.1-nano":
+    _configured_model = "gpt-5-nano"
+
+# Opcjonalny droższy model: jeśli ustawiono GAJA_USE_GPT5_MINI=1 i nie ustawiono ręcznie modelu, przełącz na gpt-5-mini
+if (
+    os.environ.get("GAJA_USE_GPT5_MINI") in {"1", "true", "True"}
+    and not _env_model
+):
+    _configured_model = "gpt-5-mini"
+
+MAIN_MODEL = _env_model or _configured_model
 PROVIDER = _config.get("ai", {}).get("provider", "openai")
-DEEP_MODEL = _config.get("ai", {}).get("deep_model", "gpt-4.1-nano")
+DEEP_MODEL = _config.get("ai", {}).get("deep_model", MAIN_MODEL)

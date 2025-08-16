@@ -133,7 +133,7 @@ class SecurityManager:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired"
             ) from e
-        except jwt.JWTError as e:
+        except jwt.PyJWTError as e:
             logger.warning(f"JWT validation error: {e}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
@@ -310,7 +310,7 @@ class SecurityManager:
 
         except jwt.ExpiredSignatureError:
             return {"valid": False, "error": "Token has expired"}
-        except jwt.JWTError as e:
+        except jwt.PyJWTError as e:
             return {"valid": False, "error": f"Invalid token: {e}"}
         except Exception as e:
             logger.error(f"Token validation error: {e}")
