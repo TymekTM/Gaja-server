@@ -353,15 +353,135 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_user_preferences_user_id ON user_preferences (user_id)"
             )
 
+            # --- New feature tables (shopping list, notes, tasks, vector memories) ---
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS shopping_list_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    item TEXT NOT NULL,
+                    quantity TEXT DEFAULT '1',
+                    status TEXT DEFAULT 'pending', -- pending | bought | removed
+                    is_persistent BOOLEAN DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_shopping_user_id ON shopping_list_items (user_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_shopping_status ON shopping_list_items (status)"
+            )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    title TEXT,
+                    content TEXT NOT NULL,
+                    tags TEXT DEFAULT '', -- comma separated
+                    is_persistent BOOLEAN DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notes_user_id ON notes (user_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notes_tags ON notes (tags)"
+            )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    priority INTEGER DEFAULT 3, -- 1(high) - 5(low)
+                    due_at TIMESTAMP,
+                    status TEXT DEFAULT 'open', -- open | in_progress | done | cancelled
+                    is_persistent BOOLEAN DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks (user_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_due_at ON tasks (due_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status)"
+            )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_vectors (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    key TEXT,
+                    content TEXT NOT NULL,
+                    embedding BLOB NOT NULL, -- JSON encoded list[float]
+                    similarity_hint REAL DEFAULT 0.0,
+                    is_persistent BOOLEAN DEFAULT 1,
+                    expires_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_vectors_user_id ON memory_vectors (user_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_vectors_key ON memory_vectors (key)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_vectors_persistent ON memory_vectors (is_persistent)"
+            )
+
+            # --- Incremental schema upgrades / migrations (lightweight) ---
+            # Add list_name column to shopping_list_items if missing (for multiple named lists support)
+            try:
+                cursor = conn.execute("PRAGMA table_info(shopping_list_items)")
+                existing_cols = {row[1] for row in cursor.fetchall()}
+                if "list_name" not in existing_cols:
+                    conn.execute(
+                        "ALTER TABLE shopping_list_items ADD COLUMN list_name TEXT DEFAULT 'shopping'"
+                    )
+                    # Backfill existing rows with default list name
+                    conn.execute(
+                        "UPDATE shopping_list_items SET list_name = 'shopping' WHERE list_name IS NULL OR list_name = ''"
+                    )
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_shopping_list_name ON shopping_list_items (list_name)"
+                    )
+                    logger.info(
+                        "Database migration: added list_name column to shopping_list_items"
+                    )
+            except Exception as e:
+                logger.error(f"Schema migration (list_name) failed: {e}")
+
     # === ZARZĄDZANIE UŻYTKOWNIKAMI ===
 
     def create_user(
         self,
         username: str,
-        email: str = None,
-        password_hash: str = None,
-        settings: dict = None,
-        api_keys: dict = None,
+        email: str | None = None,
+        password_hash: str | None = None,
+        settings: dict | None = None,
+        api_keys: dict | None = None,
     ) -> int:
         """Tworzy nowego użytkownika."""
         with self.get_db_connection() as conn:
@@ -378,11 +498,11 @@ class DatabaseManager:
                     json.dumps(api_keys or {}),
                 ),
             )
-            user_id = cursor.lastrowid
+            user_id = cursor.lastrowid or 0
             logger.info(f"Created user: {username} (ID: {user_id})")
             return user_id
 
-    def get_user(self, user_id: int = None, username: str = None) -> User | None:
+    def get_user(self, user_id: int | None = None, username: str | None = None) -> User | None:
         """Pobiera użytkownika po ID lub nazwie."""
         with self.get_db_connection() as conn:
             if user_id:
@@ -423,16 +543,18 @@ class DatabaseManager:
     def get_user_level(self, user_id: int) -> str:
         """Return user subscription level (free/plus/pro)."""
         user = self.get_user(user_id=user_id)
-        if user and isinstance(user.settings, dict):
-            return user.settings.get("level", "free")
+        if user:
+            settings = user.settings if isinstance(user.settings, dict) else {}
+            if isinstance(settings, dict):
+                return settings.get("level", "free")
         return "free"
 
     def set_user_level(self, user_id: int, level: str) -> None:
-        settings = (
-            self.get_user(user_id=user_id).settings
-            if self.get_user(user_id=user_id)
-            else {}
-        )
+        user = self.get_user(user_id=user_id)
+        if user and isinstance(user.settings, dict):
+            settings = dict(user.settings)
+        else:
+            settings = {}
         settings["level"] = level
         self.update_user_settings(user_id, settings)
 
@@ -443,7 +565,7 @@ class DatabaseManager:
         user_id: int,
         session_token: str,
         expires_at: datetime,
-        client_info: dict = None,
+        client_info: dict | None = None,
     ) -> int:
         """Tworzy nową sesję użytkownika."""
         with self.get_db_connection() as conn:
@@ -454,7 +576,7 @@ class DatabaseManager:
             """,
                 (user_id, session_token, expires_at, json.dumps(client_info or {})),
             )
-            return cursor.lastrowid
+            return cursor.lastrowid or 0
 
     def get_session(self, session_token: str) -> UserSession | None:
         """Pobiera sesję po tokenie."""
@@ -488,9 +610,9 @@ class DatabaseManager:
         user_id: int,
         role: str,
         content: str,
-        session_id: int = None,
-        metadata: dict = None,
-        parent_message_id: int = None,
+        session_id: int | None = None,
+        metadata: dict | None = None,
+        parent_message_id: int | None = None,
     ) -> int:
         """Zapisuje wiadomość do bazy danych."""
         with self.get_db_connection() as conn:
@@ -508,10 +630,10 @@ class DatabaseManager:
                     parent_message_id,
                 ),
             )
-            return cursor.lastrowid
+            return cursor.lastrowid or 0
 
     def get_user_messages(
-        self, user_id: int, limit: int = 100, session_id: int = None
+        self, user_id: int, limit: int = 100, session_id: int | None = None
     ) -> list[Message]:
         """Pobiera wiadomości użytkownika."""
         with self.get_db_connection() as conn:
@@ -530,14 +652,14 @@ class DatabaseManager:
                     SELECT * FROM messages
                     WHERE user_id = ?
                     ORDER BY created_at DESC LIMIT ?
-                """,
+                    """,
                     (user_id, limit),
                 )
 
             return [Message.from_db_row(row) for row in cursor.fetchall()]
 
     def get_conversation_context(
-        self, user_id: int, session_id: int = None, limit: int = 10
+        self, user_id: int, session_id: int | None = None, limit: int = 10
     ) -> list[Message]:
         """Pobiera kontekst konwersacji dla AI."""
         messages = self.get_user_messages(user_id, limit, session_id)
@@ -551,8 +673,8 @@ class DatabaseManager:
         context_type: str,
         key_name: str,
         value: str,
-        metadata: dict = None,
-        expires_at: datetime = None,
+        metadata: dict | None = None,
+        expires_at: datetime | None = None,
     ):
         """Zapisuje kontekst pamięci."""
         with self.get_db_connection() as conn:
@@ -573,7 +695,7 @@ class DatabaseManager:
             )
 
     def get_memory_context(
-        self, user_id: int, context_type: str, key_name: str = None
+        self, user_id: int, context_type: str, key_name: str | None = None
     ) -> list[MemoryContext]:
         """Pobiera kontekst pamięci."""
         with self.get_db_connection() as conn:
@@ -611,6 +733,591 @@ class DatabaseManager:
             if cursor.rowcount > 0:
                 logger.info(f"Cleaned up {cursor.rowcount} expired memory entries")
 
+    # === WEKTOROWA PAMIĘĆ SEMANTYCZNA ===
+
+    def add_memory_vector(
+        self,
+        user_id: int,
+        content: str,
+        embedding: list[float],
+        key: str | None = None,
+        similarity_hint: float = 0.0,
+        is_persistent: bool = True,
+        expires_at: datetime | None = None,
+    ) -> int:
+        """Dodaje wektor pamięci semantycznej.
+
+        Args:
+            user_id: ID użytkownika
+            content: Treść pamięci
+            embedding: Wektor osadzający (lista float)
+            key: Opcjonalny klucz dla grupowania
+            similarity_hint: Wstępny hint podobieństwa (może być 0)
+            is_persistent: Czy pamięć jest trwała
+            expires_at: Czas wygaśnięcia dla pamięci nietrwałych
+
+        Returns:
+            ID wstawionego rekordu
+        """
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO memory_vectors (user_id, key, content, embedding, similarity_hint, is_persistent, expires_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                    (
+                        user_id,
+                        key,
+                        content,
+                        json.dumps(embedding),
+                        similarity_hint,
+                        1 if is_persistent else 0,
+                        expires_at.isoformat() if expires_at else None,
+                    ),
+                )
+                return cursor.lastrowid or -1
+        except Exception as e:
+            logger.error(f"Error inserting memory vector: {e}")
+            return -1
+
+    def get_memory_vectors(self, user_id: int, limit: int = 500) -> list[dict[str, Any]]:
+        """Pobiera wektorowe pamięci użytkownika (aktywnie ważne)."""
+        with self.get_db_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT id, key, content, embedding, similarity_hint, is_persistent, expires_at, created_at
+                FROM memory_vectors
+                WHERE user_id = ? AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+                ORDER BY created_at DESC
+                LIMIT ?
+            """,
+                (user_id, limit),
+            )
+            rows = cursor.fetchall()
+            results: list[dict[str, Any]] = []
+            for r in rows:
+                try:
+                    embedding = json.loads(r[3]) if r[3] else []
+                except json.JSONDecodeError:
+                    embedding = []
+                results.append(
+                    {
+                        "id": r[0],
+                        "key": r[1],
+                        "content": r[2],
+                        "embedding": embedding,
+                        "similarity_hint": r[4],
+                        "is_persistent": bool(r[5]),
+                        "expires_at": r[6],
+                        "created_at": r[7],
+                    }
+                )
+            return results
+
+    def cleanup_expired_vectors(self) -> int:
+        """Czyści wygasłe wektorowe pamięci. Zwraca liczbę usuniętych rekordów."""
+        with self.get_db_connection() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM memory_vectors
+                WHERE expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP
+            """
+            )
+            deleted = cursor.rowcount or 0
+            if deleted:
+                logger.info(f"Cleaned up {deleted} expired vector memories")
+            return deleted
+
+    # === SHOPPING LIST (structured, multi-list with statuses) ===
+
+    def add_shopping_item(
+        self,
+        user_id: int,
+        item: str,
+        quantity: str | None = None,
+        list_name: str = "shopping",
+        is_persistent: bool = True,
+    ) -> int:
+        """Add an item to a (possibly named) shopping list.
+
+        Deduplicates (case-insensitive) by (user_id, list_name, item) when status != removed.
+        If item already exists and was marked bought/ pending, increments quantity numeric part if both quantities numeric.
+        Returns ID of inserted or updated row.
+        """
+        clean_item = item.strip()
+        clean_list = list_name.strip() or "shopping"
+        qty = (quantity or "1").strip() or "1"
+        try:
+            with self.get_db_connection() as conn:
+                # Try existing
+                cursor = conn.execute(
+                    """
+                    SELECT id, quantity FROM shopping_list_items
+                    WHERE user_id = ? AND LOWER(list_name)=LOWER(?) AND LOWER(item)=LOWER(?) AND status != 'removed'
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (user_id, clean_list, clean_item),
+                )
+                row = cursor.fetchone()
+                if row:
+                    # Potentially merge quantities if numeric
+                    existing_id, existing_qty = row
+                    try:
+                        new_total = int(existing_qty) + int(qty)
+                        merged_qty = str(new_total)
+                    except (ValueError, TypeError):
+                        merged_qty = existing_qty  # Keep original if not both ints
+                    conn.execute(
+                        """
+                        UPDATE shopping_list_items SET quantity = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (merged_qty, existing_id),
+                    )
+                    return existing_id
+                cursor = conn.execute(
+                    """
+                    INSERT INTO shopping_list_items (user_id, item, quantity, status, is_persistent, list_name)
+                    VALUES (?, ?, ?, 'pending', ?, ?)
+                    """,
+                    (user_id, clean_item, qty, 1 if is_persistent else 0, clean_list),
+                )
+                return cursor.lastrowid or 0
+        except Exception as e:
+            logger.error(f"Error add_shopping_item: {e}")
+            return 0
+
+    def list_shopping_items(
+        self,
+        user_id: int,
+        list_name: str | None = None,
+        status: str | None = None,
+        include_removed: bool = False,
+    ) -> list[dict[str, Any]]:
+        """List shopping items with optional filters."""
+        clauses = ["user_id = ?"]
+        params: list[Any] = [user_id]
+        if list_name:
+            clauses.append("LOWER(list_name)=LOWER(?)")
+            params.append(list_name)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if not include_removed:
+            clauses.append("status != 'removed'")
+        where_sql = " AND ".join(clauses)
+        query = f"""
+            SELECT id, item, quantity, status, is_persistent, created_at, updated_at, list_name
+            FROM shopping_list_items
+            WHERE {where_sql}
+            ORDER BY created_at ASC
+        """
+        with self.get_db_connection() as conn:
+            try:
+                cursor = conn.execute(query, tuple(params))
+                rows = cursor.fetchall()
+                return [
+                    {
+                        "id": r[0],
+                        "item": r[1],
+                        "quantity": r[2],
+                        "status": r[3],
+                        "is_persistent": bool(r[4]),
+                        "created_at": r[5],
+                        "updated_at": r[6],
+                        "list_name": r[7],
+                    }
+                    for r in rows
+                ]
+            except Exception as e:
+                logger.error(f"Error list_shopping_items: {e}")
+                return []
+
+    def update_shopping_item_status(
+        self, user_id: int, item_id: int, status: str
+    ) -> bool:
+        """Update status of a shopping item (pending|bought|removed)."""
+        if status not in {"pending", "bought", "removed"}:
+            return False
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE shopping_list_items
+                    SET status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND user_id = ?
+                    """,
+                    (status, item_id, user_id),
+                )
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error update_shopping_item_status: {e}")
+            return False
+
+    def remove_shopping_item(self, user_id: int, item_id: int, hard: bool = False) -> bool:
+        """Remove shopping item. Soft removal sets status=removed unless hard specified."""
+        try:
+            with self.get_db_connection() as conn:
+                if hard:
+                    cursor = conn.execute(
+                        "DELETE FROM shopping_list_items WHERE id = ? AND user_id = ?",
+                        (item_id, user_id),
+                    )
+                else:
+                    cursor = conn.execute(
+                        """
+                        UPDATE shopping_list_items SET status='removed', updated_at=CURRENT_TIMESTAMP
+                        WHERE id = ? AND user_id = ?
+                        """,
+                        (item_id, user_id),
+                    )
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error remove_shopping_item: {e}")
+            return False
+
+    def clear_shopping_list(
+        self, user_id: int, list_name: str, include_bought: bool = True
+    ) -> int:
+        """Clear items from a named list. If include_bought is False, only remove pending."""
+        try:
+            with self.get_db_connection() as conn:
+                if include_bought:
+                    cursor = conn.execute(
+                        """
+                        UPDATE shopping_list_items SET status='removed', updated_at=CURRENT_TIMESTAMP
+                        WHERE user_id = ? AND LOWER(list_name)=LOWER(?) AND status != 'removed'
+                        """,
+                        (user_id, list_name),
+                    )
+                else:
+                    cursor = conn.execute(
+                        """
+                        UPDATE shopping_list_items SET status='removed', updated_at=CURRENT_TIMESTAMP
+                        WHERE user_id = ? AND LOWER(list_name)=LOWER(?) AND status = 'pending'
+                        """,
+                        (user_id, list_name),
+                    )
+                return cursor.rowcount or 0
+        except Exception as e:
+            logger.error(f"Error clear_shopping_list: {e}")
+            return 0
+
+    # === NOTES MANAGEMENT ===
+
+    def add_note(
+        self,
+        user_id: int,
+        title: str | None,
+        content: str,
+        tags: list[str] | None = None,
+        is_persistent: bool = True,
+    ) -> int:
+        """Create a new note with optional tags."""
+        tag_str = ",".join(sorted({t.strip() for t in (tags or []) if t.strip()}))
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO notes (user_id, title, content, tags, is_persistent)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (user_id, title, content, tag_str, 1 if is_persistent else 0),
+                )
+                return cursor.lastrowid or 0
+        except Exception as e:
+            logger.error(f"Error add_note: {e}")
+            return 0
+
+    def list_notes(
+        self,
+        user_id: int,
+        tag: str | None = None,
+        search: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List notes with optional tag or search filter."""
+        clauses = ["user_id = ?"]
+        params: list[Any] = [user_id]
+        if tag:
+            clauses.append("tags LIKE ?")
+            params.append(f"%{tag}%")
+        if search:
+            clauses.append("(content LIKE ? OR title LIKE ?)")
+            params.extend([f"%{search}%", f"%{search}%"])
+        where_sql = " AND ".join(clauses)
+        query = f"""
+            SELECT id, title, content, tags, is_persistent, created_at, updated_at
+            FROM notes
+            WHERE {where_sql}
+            ORDER BY updated_at DESC
+            LIMIT ?
+        """
+        params.append(limit)
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.execute(query, tuple(params))
+                rows = cursor.fetchall()
+                return [
+                    {
+                        "id": r[0],
+                        "title": r[1],
+                        "content": r[2],
+                        "tags": r[3].split(",") if r[3] else [],
+                        "is_persistent": bool(r[4]),
+                        "created_at": r[5],
+                        "updated_at": r[6],
+                    }
+                    for r in rows
+                ]
+        except Exception as e:
+            logger.error(f"Error list_notes: {e}")
+            return []
+
+    def get_note(self, user_id: int, note_id: int) -> dict[str, Any] | None:
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    SELECT id, title, content, tags, is_persistent, created_at, updated_at
+                    FROM notes WHERE id = ? AND user_id = ?
+                    """,
+                    (note_id, user_id),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row[0],
+                    "title": row[1],
+                    "content": row[2],
+                    "tags": row[3].split(",") if row[3] else [],
+                    "is_persistent": bool(row[4]),
+                    "created_at": row[5],
+                    "updated_at": row[6],
+                }
+        except Exception as e:
+            logger.error(f"Error get_note: {e}")
+            return None
+
+    def update_note(
+        self,
+        user_id: int,
+        note_id: int,
+        title: str | None = None,
+        content: str | None = None,
+        tags: list[str] | None = None,
+    ) -> bool:
+        fields = []
+        params: list[Any] = []
+        if title is not None:
+            fields.append("title = ?")
+            params.append(title)
+        if content is not None:
+            fields.append("content = ?")
+            params.append(content)
+        if tags is not None:
+            tag_str = ",".join(sorted({t.strip() for t in tags if t.strip()}))
+            fields.append("tags = ?")
+            params.append(tag_str)
+        if not fields:
+            return False
+        params.extend([note_id, user_id])
+        sql = f"UPDATE notes SET {', '.join(fields)}, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?"
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.execute(sql, tuple(params))
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error update_note: {e}")
+            return False
+
+    def delete_note(self, user_id: int, note_id: int) -> bool:
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.execute(
+                    "DELETE FROM notes WHERE id = ? AND user_id = ?",
+                    (note_id, user_id),
+                )
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error delete_note: {e}")
+            return False
+
+    # === TASKS MANAGEMENT (advanced) ===
+
+    def add_task_db(
+        self,
+        user_id: int,
+        title: str,
+        description: str = "",
+        priority: int = 3,
+        due_at: datetime | None = None,
+        is_persistent: bool = True,
+    ) -> int:
+        """Add a structured task (priority 1-5)."""
+        p = min(5, max(1, priority))
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO tasks (user_id, title, description, priority, due_at, is_persistent)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        user_id,
+                        title,
+                        description,
+                        p,
+                        due_at.strftime("%Y-%m-%d %H:%M:%S") if due_at else None,
+                        1 if is_persistent else 0,
+                    ),
+                )
+                return cursor.lastrowid or 0
+        except Exception as e:
+            logger.error(f"Error add_task_db: {e}")
+            return 0
+
+    def list_tasks(
+        self,
+        user_id: int,
+        status: str | None = None,
+        include_done: bool = True,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        clauses = ["user_id = ?"]
+        params: list[Any] = [user_id]
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if not include_done and not status:
+            clauses.append("status != 'done'")
+        where_sql = " AND ".join(clauses)
+        query = f"""
+            SELECT id, title, description, priority, due_at, status, is_persistent, created_at, updated_at
+            FROM tasks
+            WHERE {where_sql}
+            ORDER BY 
+                CASE status WHEN 'open' THEN 0 WHEN 'in_progress' THEN 1 WHEN 'done' THEN 2 ELSE 3 END,
+                priority ASC,
+                COALESCE(due_at,'9999-12-31') ASC
+            LIMIT ?
+        """
+        params.append(limit)
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.execute(query, tuple(params))
+                rows = cursor.fetchall()
+                return [
+                    {
+                        "id": r[0],
+                        "title": r[1],
+                        "description": r[2],
+                        "priority": r[3],
+                        "due_at": r[4],
+                        "status": r[5],
+                        "is_persistent": bool(r[6]),
+                        "created_at": r[7],
+                        "updated_at": r[8],
+                    }
+                    for r in rows
+                ]
+        except Exception as e:
+            logger.error(f"Error list_tasks: {e}")
+            return []
+
+    def update_task_status(self, user_id: int, task_id: int, status: str) -> bool:
+        if status not in {"open", "in_progress", "done", "cancelled"}:
+            return False
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE tasks SET status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND user_id = ?
+                    """,
+                    (status, task_id, user_id),
+                )
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error update_task_status: {e}")
+            return False
+
+    def update_task(
+        self,
+        user_id: int,
+        task_id: int,
+        title: str | None = None,
+        description: str | None = None,
+        priority: int | None = None,
+        due_at: datetime | None = None,
+    ) -> bool:
+        fields = []
+        params: list[Any] = []
+        if title is not None:
+            fields.append("title = ?")
+            params.append(title)
+        if description is not None:
+            fields.append("description = ?")
+            params.append(description)
+        if priority is not None:
+            fields.append("priority = ?")
+            params.append(min(5, max(1, priority)))
+        if due_at is not None:
+            fields.append("due_at = ?")
+            params.append(due_at.strftime("%Y-%m-%d %H:%M:%S"))
+        if not fields:
+            return False
+        params.extend([task_id, user_id])
+        sql = f"UPDATE tasks SET {', '.join(fields)}, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?"
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.execute(sql, tuple(params))
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error update_task: {e}")
+            return False
+
+    def delete_task(self, user_id: int, task_id: int) -> bool:
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.execute(
+                    "DELETE FROM tasks WHERE id = ? AND user_id = ?",
+                    (task_id, user_id),
+                )
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error delete_task: {e}")
+            return False
+
+    def get_overdue_tasks(self, user_id: int) -> list[dict[str, Any]]:
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    SELECT id, title, description, priority, due_at, status FROM tasks
+                    WHERE user_id = ? AND due_at IS NOT NULL AND due_at < CURRENT_TIMESTAMP AND status != 'done'
+                    ORDER BY due_at ASC
+                    """,
+                    (user_id,),
+                )
+                rows = cursor.fetchall()
+                return [
+                    {
+                        "id": r[0],
+                        "title": r[1],
+                        "description": r[2],
+                        "priority": r[3],
+                        "due_at": r[4],
+                        "status": r[5],
+                    }
+                    for r in rows
+                ]
+        except Exception as e:
+            logger.error(f"Error get_overdue_tasks: {e}")
+            return []
+
     # === ZARZĄDZANIE PREFERENCJAMI ===
 
     def set_user_preference(
@@ -633,7 +1340,7 @@ class DatabaseManager:
             )
 
     def get_user_preferences(
-        self, user_id: int, category: str = None
+        self, user_id: int, category: str | None = None
     ) -> dict[str, Any]:
         """Pobiera preferencje użytkownika."""
         with self.get_db_connection() as conn:
@@ -682,9 +1389,9 @@ class DatabaseManager:
         tokens_used: int = 0,
         cost: float = 0.0,
         success: bool = True,
-        response_time: float = None,
-        error_message: str = None,
-        metadata: dict = None,
+        response_time: float | None = None,
+        error_message: str | None = None,
+        metadata: dict | None = None,
     ):
         """Loguje wykorzystanie API."""
         with self.get_db_connection() as conn:
@@ -739,9 +1446,9 @@ class DatabaseManager:
         level: str,
         module: str,
         message: str,
-        user_id: int = None,
-        session_id: int = None,
-        metadata: dict = None,
+        user_id: int | None = None,
+        session_id: int | None = None,
+        metadata: dict | None = None,
     ):
         """Loguje zdarzenie systemowe."""
         with self.get_db_connection() as conn:
@@ -1249,7 +1956,7 @@ class ConfigManager:
         """Asynchroniczna inicjalizacja dla FastAPI."""
         await self.database.initialize()
 
-    def get_api_key(self, service: str, user_id: int = None) -> str | None:
+    def get_api_key(self, service: str, user_id: int | None = None) -> str | None:
         """Pobiera klucz API - najpierw z ustawień użytkownika, potem z environment."""
         if user_id:
             user_key = self.database.get_user_api_key(user_id, service)

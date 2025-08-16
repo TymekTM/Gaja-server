@@ -29,7 +29,7 @@ except ImportError:
     docker = None
 
 
-def load_env_file(env_path: Path = None):
+def load_env_file(env_path: Optional[Path] = None):
     """Load environment variables from .env file."""
     if env_path is None:
         env_path = Path(__file__).parent / ".env"
@@ -525,10 +525,11 @@ class GajaServerStarter:
         if not requests:
             self.logger.warning("Requests not available, skipping health check")
             return True
-        
-        url = f"http://{host}:{port}/health"
+        # Use loopback for health probing if binding to all interfaces
+        probe_host = '127.0.0.1' if host in ('0.0.0.0', '::') else host
+        url = f"http://{probe_host}:{port}/health"
         start_time = time.time()
-        
+
         while time.time() - start_time < timeout:
             try:
                 response = requests.get(url, timeout=2)
@@ -538,7 +539,7 @@ class GajaServerStarter:
             except Exception:
                 pass
             time.sleep(1)
-        
+
         self.logger.warning("Server health check failed")
         return False
     
@@ -726,9 +727,10 @@ class GajaServerStarter:
         import asyncio
         import aiohttp
         
-        url = f"http://{host}:{port}/health"
+        probe_host = '127.0.0.1' if host in ('0.0.0.0', '::') else host
+        url = f"http://{probe_host}:{port}/health"
         start_time = asyncio.get_event_loop().time()
-        
+
         while (asyncio.get_event_loop().time() - start_time) < timeout:
             try:
                 async with aiohttp.ClientSession() as session:
@@ -738,9 +740,9 @@ class GajaServerStarter:
                             return
             except Exception:
                 pass
-            
+
             await asyncio.sleep(1)
-        
+
         self.logger.warning(f"Server did not respond to health checks within {timeout} seconds")
     
     async def _monitor_server_health(self, host: str, port: int):
@@ -748,14 +750,15 @@ class GajaServerStarter:
         import asyncio
         import aiohttp
         
-        url = f"http://{host}:{port}/health"
+        probe_host = '127.0.0.1' if host in ('0.0.0.0', '::') else host
+        url = f"http://{probe_host}:{port}/health"
         consecutive_failures = 0
         max_failures = 3
         check_interval = 30  # seconds
-        
+
         # Wait a bit before starting health checks
         await asyncio.sleep(10)
-        
+
         while True:
             try:
                 async with aiohttp.ClientSession() as session:
@@ -766,15 +769,15 @@ class GajaServerStarter:
                         else:
                             consecutive_failures += 1
                             self.logger.warning(f"Health check returned status {response.status}")
-                            
+
             except Exception as e:
                 consecutive_failures += 1
                 self.logger.warning(f"Health check failed: {e}")
-            
+
             if consecutive_failures >= max_failures:
                 self.logger.error(f"Health check failed {consecutive_failures} consecutive times")
                 raise Exception("Server health check failed")
-            
+
             await asyncio.sleep(check_interval)
     
     async def _monitor_docker_health(self):

@@ -5,9 +5,30 @@ system to OpenAI function calling format.
 """
 
 import logging
+import time
+import threading
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+_FCS_SINGLETON = None
+_FCS_LOCK = threading.Lock()
+
+
+def get_function_calling_system() -> "FunctionCallingSystem":
+    """Return global singleton instance of FunctionCallingSystem.
+
+    Uses double-checked locking for thread-safe lazy initialization. Keeps
+    conversion caches (modules -> functions) warm across multiple AI calls.
+    """
+    global _FCS_SINGLETON
+    if _FCS_SINGLETON is None:
+        with _FCS_LOCK:
+            if _FCS_SINGLETON is None:  # second check inside lock
+                inst = FunctionCallingSystem()
+                _FCS_SINGLETON = inst
+    return _FCS_SINGLETON  # type: ignore[return-value]
 
 
 class FunctionCallingSystem:
@@ -16,8 +37,12 @@ class FunctionCallingSystem:
     def __init__(self):
         """Initialize function calling system."""
         self.modules = {}
-        self.function_handlers: dict[str, dict[str, Any]] = {}
-        self._cached_module_instances = {}  # Cache for module instances
+        # Handlers mapping function name -> handler info dict
+        self.function_handlers = {}
+        # Cache for instantiated module singletons
+        self._cached_module_instances = {}
+        # Cache of converted functions (list of function defs) to avoid repeated imports
+        self._functions_cache = None
 
     async def initialize(self):
         """Asynchroniczna inicjalizacja systemu funkcji."""
@@ -48,197 +73,146 @@ class FunctionCallingSystem:
         logger.info(f"Registered module: {module_name}")
 
     def convert_modules_to_functions(self) -> list[dict[str, Any]]:
-        """Convert plugin manager modules and server modules to OpenAI function calling
-        format."""
-        functions = []
+        """Convert plugin manager & server modules to OpenAI function definitions."""
+        # Return cached conversion if available
+        if self._functions_cache is not None:
+            return self._functions_cache
 
-        # First try plugin manager (legacy support)
+        start_time = time.perf_counter()
+        functions: list[dict[str, Any]] = []
+        # ---- Plugin manager functions ----
         try:
             from core.plugin_manager import plugin_manager
 
-            logger.info(f"Plugin manager function registry has {len(plugin_manager.function_registry)} functions")
-            if plugin_manager.function_registry:
-                # Get functions from plugin manager's function registry
-                for (
-                    full_func_name,
-                    func_info,
-                ) in plugin_manager.function_registry.items():
-                    logger.info(f"Processing function: {full_func_name}")
-                    try:
-                        # Parse plugin name and function name
-                        parts = full_func_name.split(".")
-                        if len(parts) != 2:
-                            logger.warning(
-                                f"Skipping function with invalid name format: {full_func_name}"
-                            )
-                            continue
+            registry = getattr(plugin_manager, "function_registry", {}) or {}
+            for full_func_name, func_info in registry.items():
+                parts = full_func_name.split(".")
+                if len(parts) != 2:
+                    continue
+                plugin_name, func_name = parts
+                if isinstance(func_info, dict):
+                    description = func_info.get(
+                        "description", f"Function {full_func_name}"
+                    )
+                    parameters = func_info.get(
+                        "parameters",
+                        {"type": "object", "properties": {}, "required": []},
+                    )
+                else:
+                    description = f"Function {full_func_name}"
+                    parameters = {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                    }
+                openai_function = {
+                    "type": "function",
+                    "function": {
+                        "name": full_func_name.replace(".", "_"),
+                        "description": description,
+                        "parameters": parameters,
+                    },
+                }
+                functions.append(openai_function)
+                handler_name = full_func_name.replace(".", "_")
+                self.function_handlers[handler_name] = {
+                    "original_name": full_func_name,
+                    "plugin_name": plugin_name,
+                    "function_name": func_name,
+                }
+        except Exception:  # pragma: no cover
+            logger.debug("Plugin manager not available for function conversion")
 
-                        plugin_name, func_name = parts
+        # ---- Server modules ----
+        import importlib
 
-                        # Create OpenAI function format
-                        openai_function = {
-                            "type": "function",
-                            "function": {
-                                "name": full_func_name.replace(
-                                    ".", "_"
-                                ),  # OpenAI doesn't like dots
-                                "description": func_info.get(
-                                    "description", f"Function {full_func_name}"
-                                ),
-                                "parameters": func_info.get(
-                                    "parameters",
-                                    {
-                                        "type": "object",
-                                        "properties": {},
-                                        "required": [],
-                                    },
-                                ),
-                            },
-                        }
+        module_specs = [
+            ("weather", "weather_module"),
+            ("search", "search_module"),
+            ("core", "core_module"),
+            ("music", "music_module"),
+            ("api", "api_module"),
+            ("web", "open_web_module"),
+            ("v_memory", "vector_memory_module"),
+            ("memory", "memory_module"),
+            ("notes", "notes_module"),
+            ("tasks", "tasks_module"),
+        ]
 
-                        functions.append(openai_function)
-                        logger.debug(
-                            f"Converted function: {full_func_name} -> {openai_function['function']['name']}"
-                        )
-
-                        # Store handler info for later execution
-                        handler_name = full_func_name.replace(".", "_")
-                        self.function_handlers[handler_name] = {
-                            "original_name": full_func_name,
-                            "plugin_name": plugin_name,
-                            "function_name": func_name,
-                        }
-
-                    except Exception as e:
-                        logger.error(f"Error converting function {full_func_name}: {e}")
-                        continue
-        except Exception as e:
-            logger.debug(f"Plugin manager not available or has no functions: {e}")
-
-        # Add server modules directly (main source of functions)
-        import sys
-
-        print("DEBUG: Starting server modules section", flush=True)
-        sys.stderr.write("DEBUG: Starting server modules section\n")
-        sys.stderr.flush()
-        try:
-            print("DEBUG: Importing server modules...")
-            from modules import (  # onboarding_plugin_module,  # Disabled - not needed; plugin_monitor_module,  # Disabled - not needed
-                api_module,
-                core_module,
-                memory_module,
-                music_module,
-                open_web_module,
-                search_module,
-                weather_module,
-            )
-
-            print("DEBUG: Server modules imported successfully")
-
-            server_modules = [
-                ("weather", weather_module),
-                ("search", search_module),
-                ("core", core_module),
-                ("music", music_module),
-                ("api", api_module),
-                ("web", open_web_module),
-                ("memory", memory_module),
-                # ("monitor", plugin_monitor_module),  # Disabled - not needed
-                # ("onboarding", onboarding_plugin_module),  # Disabled - not needed
-            ]
-
-            print(f"DEBUG: Processing {len(server_modules)} server modules")
-
-            for module_name, module in server_modules:
-                print(f"DEBUG: Processing module {module_name}")
+        for module_name, import_name in module_specs:
+            try:
+                module = importlib.import_module(f"modules.{import_name}")
+            except Exception as e:  # pragma: no cover
+                logger.error(f"Failed to import server module {import_name}: {e}")
+                continue
+            if not hasattr(module, "get_functions"):
+                continue
+            try:
+                module_functions = module.get_functions()
+            except Exception as e:  # pragma: no cover
+                logger.error(f"get_functions failed for {module_name}: {e}")
+                continue
+            for func in module_functions:
                 try:
-                    if hasattr(module, "get_functions"):
-                        print(f"DEBUG: Module {module_name} has get_functions")
-                        # Call get_functions directly on the module
-                        module_functions = module.get_functions()
-                        logger.debug(
-                            f"Got {len(module_functions)} functions from {module_name}"
-                        )
-                        print(
-                            f"DEBUG: Got {len(module_functions)} functions from {module_name}"
-                        )
-
-                        for func in module_functions:
-                            openai_func = {
-                                "type": "function",
-                                "function": {
-                                    "name": f"{module_name}_{func['name']}",
-                                    "description": func["description"],
-                                    "parameters": func["parameters"],
-                                },
-                            }
-                            functions.append(openai_func)
-
-                            # Store handler for execution - create module instance
-                            handler_name = f"{module_name}_{func['name']}"
-
-                            # Create or get cached module instance based on module type
-                            if module_name not in self._cached_module_instances:
-                                if hasattr(module, "WeatherModule"):
-                                    self._cached_module_instances[module_name] = module.WeatherModule()
-                                elif hasattr(module, "SearchModule"):
-                                    self._cached_module_instances[module_name] = module.SearchModule()
-                                elif hasattr(module, "CoreModule"):
-                                    self._cached_module_instances[module_name] = module.CoreModule()
-                                elif hasattr(module, "MusicModule"):
-                                    self._cached_module_instances[module_name] = module.MusicModule()
-                                elif hasattr(module, "APIModule"):
-                                    self._cached_module_instances[module_name] = module.APIModule()
-                                elif hasattr(module, "WebModule"):
-                                    self._cached_module_instances[module_name] = module.WebModule()
-                                elif hasattr(module, "MemoryModule"):
-                                    self._cached_module_instances[module_name] = module.MemoryModule()
-                                elif hasattr(module, "PluginMonitorModule"):
-                                    self._cached_module_instances[module_name] = module.PluginMonitorModule()
-                                elif hasattr(module, "OnboardingPluginModule"):
-                                    self._cached_module_instances[module_name] = module.OnboardingPluginModule()
-                                else:
-                                    logger.warning(
-                                        f"Could not create instance for {module_name}"
+                    openai_func = {
+                        "type": "function",
+                        "function": {
+                            "name": f"{module_name}_{func['name']}",
+                            "description": func.get("description", "No description"),
+                            "parameters": func.get(
+                                "parameters",
+                                {"type": "object", "properties": {}, "required": []},
+                            ),
+                        },
+                    }
+                    functions.append(openai_func)
+                    handler_name = f"{module_name}_{func['name']}"
+                    if module_name not in self._cached_module_instances:
+                        # Instantiate module class if present
+                        instance = None
+                        for cls_name in [
+                            "WeatherModule",
+                            "SearchModule",
+                            "CoreModule",
+                            "MusicModule",
+                            "APIModule",
+                            "WebModule",
+                            "VectorMemoryModule",
+                            "MemoryModule",
+                            "NotesModule",
+                            "TasksModule",
+                        ]:
+                            if hasattr(module, cls_name):
+                                try:
+                                    instance = getattr(module, cls_name)()
+                                except Exception as inst_err:  # pragma: no cover
+                                    logger.error(
+                                        f"Failed instantiating {cls_name} for {module_name}: {inst_err}"
                                     )
-                                    print(
-                                        f"DEBUG: Could not create instance for {module_name}"
-                                    )
-                                    continue
-                            
-                            module_instance = self._cached_module_instances[module_name]
+                                break
+                        if instance:
+                            self._cached_module_instances[module_name] = instance
+                        else:
+                            # Skip handler registration if no instance
+                            continue
+                    module_instance = self._cached_module_instances[module_name]
+                    self.function_handlers[handler_name] = {
+                        "module": module_instance,
+                        "function_name": func["name"],
+                        "module_name": module_name,
+                        "type": "server_module",
+                    }
+                except Exception as func_err:  # pragma: no cover
+                    logger.error(
+                        f"Error processing function {func} in module {module_name}: {func_err}"
+                    )
 
-                            self.function_handlers[handler_name] = {
-                                "module": module_instance,
-                                "function_name": func["name"],
-                                "module_name": module_name,
-                                "type": "server_module",
-                            }
-
-                            logger.debug(f"Added server function: {handler_name}")
-                            print(f"DEBUG: Added server function: {handler_name}")
-                    else:
-                        logger.warning(
-                            f"Module {module_name} does not have get_functions method"
-                        )
-                        print(
-                            f"DEBUG: Module {module_name} does not have get_functions method"
-                        )
-                except Exception as e:
-                    logger.error(f"Error loading functions from {module_name}: {e}")
-                    print(f"DEBUG: Error loading functions from {module_name}: {e}")
-                    import traceback
-
-                    logger.error(traceback.format_exc())
-                    traceback.print_exc()
-        except Exception as e:
-            logger.error(f"Error loading server modules: {e}")
-            print(f"DEBUG: Error loading server modules: {e}")
-            import traceback
-
-            traceback.print_exc()
-
-        logger.info(f"Converted {len(functions)} functions for OpenAI")
+        elapsed = (time.perf_counter() - start_time) * 1000
+        logger.info(
+            f"Converted {len(functions)} functions for OpenAI in {elapsed:.1f} ms"
+        )
+        # Cache result to avoid repeated import/instantiation overhead
+        self._functions_cache = functions
         return functions
 
     def _create_main_function(
@@ -476,6 +450,34 @@ class FunctionCallingSystem:
                     "provided_parameters": parameters
                 }
             }
+
+        # Notes module: create_note requires content
+        if function_name == "notes_create_note" and not parameters.get("content"):
+            return {
+                "type": "clarification_request",
+                "action_type": "clarification_request",
+                "message": "Brakuje treści notatki.",
+                "clarification_data": {
+                    "question": "Jaka treść notatki mam zapisać?",
+                    "parameter": "content",
+                    "function": function_name,
+                    "provided_parameters": parameters
+                }
+            }
+
+        # Tasks module: add_task requires title
+        if function_name == "tasks_add_task" and not parameters.get("title"):
+            return {
+                "type": "clarification_request",
+                "action_type": "clarification_request",
+                "message": "Brakuje tytułu zadania.",
+                "clarification_data": {
+                    "question": "Jakie zadanie chcesz dodać? Podaj krótki tytuł.",
+                    "parameter": "title",
+                    "function": function_name,
+                    "provided_parameters": parameters
+                }
+            }
         
         # Add more function-specific parameter checks here as needed
         # if function_name.startswith("music_") and not parameters.get("song"):
@@ -511,8 +513,13 @@ class FunctionCallingSystem:
 
                 if hasattr(module, "execute_function"):
                     # Use the module's execute_function method (async)
+                    exec_start = time.perf_counter()
                     result = await module.execute_function(
                         func_name, arguments, user_id=1
+                    )
+                    exec_elapsed = (time.perf_counter() - exec_start) * 1000
+                    logger.debug(
+                        f"Executed {module_name}.{func_name} in {exec_elapsed:.1f} ms"
                     )
                     logger.info(f"Server module function result: {result}")
                     return result
@@ -532,7 +539,7 @@ class FunctionCallingSystem:
                     return f"Plugin {plugin_name} not loaded"
 
                 # Get the function from the plugin module
-                if hasattr(plugin_info.module, "execute_function"):
+                if plugin_info.module and hasattr(plugin_info.module, "execute_function"):
                     # Use the plugin's execute_function method (async)
                     result = await plugin_info.module.execute_function(
                         func_name, arguments, user_id=1
@@ -566,6 +573,6 @@ def convert_module_system_to_function_calling(
     modules: dict[str, Any],
 ) -> FunctionCallingSystem:
     """Convert the entire module system to function calling format."""
-    system = FunctionCallingSystem()
+    system = get_function_calling_system()
     system.modules = modules
     return system

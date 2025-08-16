@@ -8,9 +8,11 @@ import logging
 import os
 import re
 from collections import deque
+from time import perf_counter, time as epoch_time
 import asyncio
 from collections.abc import Callable
 from functools import lru_cache
+import hashlib
 from typing import Any, Optional
 
 import httpx  # Async HTTP client replacing requests
@@ -34,6 +36,67 @@ except ImportError as e:
     env_manager = None
     logger.warning(f"Could not import EnvironmentManager: {e}")
 
+
+# -----------------------------------------------------------------------------
+# Prosty tracer latencji (lekki, opcjonalny)
+# -----------------------------------------------------------------------------
+
+class LatencyTracer:
+    """Collects timestamped latency events for a single response generation.
+
+    Usage:
+        tracer = LatencyTracer(tracking_id)
+        tracer.event("stage_name", extra={...})
+        tracer.flush_to_file(path)
+    """
+
+    __slots__ = ("tracking_id", "start_monotonic", "start_epoch", "events", "enabled")
+
+    def __init__(self, tracking_id: str | None, enabled: bool = True):
+        self.tracking_id = tracking_id or "generic"
+        self.start_monotonic = perf_counter()
+        self.start_epoch = epoch_time()
+        self.events: list[dict[str, Any]] = []
+        self.enabled = enabled
+        if self.enabled:
+            self.event("trace_start")
+
+    def event(self, name: str, extra: dict | None = None):  # noqa: D401 - short util
+        if not self.enabled:
+            return
+        now_mono = perf_counter()
+        payload = {
+            "tracking_id": self.tracking_id,
+            "t_rel_ms": (now_mono - self.start_monotonic) * 1000.0,
+            "t_epoch": epoch_time(),
+            "event": name,
+        }
+        if extra:
+            # keep JSON serializable (best-effort)
+            safe_extra = {}
+            for k, v in extra.items():
+                try:
+                    json.dumps(v)
+                    safe_extra[k] = v
+                except Exception:  # pragma: no cover - defensive
+                    safe_extra[k] = str(v)
+            payload["extra"] = safe_extra
+        self.events.append(payload)
+
+    def flush_to_file(self, path: str = "user_data/latency_events.jsonl"):
+        if not self.enabled or not self.events:
+            return
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                for ev in self.events:
+                    f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"LatencyTracer flush failed: {exc}")
+
+
+# Environment toggle (set GAJA_LATENCY_TRACE=0 to disable without code changes)
+LATENCY_TRACE_ENABLED = os.getenv("GAJA_LATENCY_TRACE", "1") not in ("0", "false", "False")
 
 # -----------------------------------------------------------------------------
 # Klasa providerów
@@ -185,6 +248,9 @@ class AIProviders:
         function_calling_system=None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+    stream: bool = False,
+    tracer: LatencyTracer | None = None,
+    partial_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any | None]:
         try:
             # 1. Resolve API key
@@ -265,6 +331,68 @@ class AIProviders:
             if response is None:
                 raise last_error if last_error else RuntimeError("OpenAI call failure")
 
+            # 5. Streaming path (no tool calling on first pass for simplicity)
+            if stream and not functions:
+                try:
+                    # Attempt streaming with new or old token param key
+                    stream_attempts = [True, False] if model.startswith("gpt-5-") else [False, True]
+                    response_stream = None
+                    for use_new in stream_attempts:
+                        params, token_key = build_params(use_new)
+                        params["stream"] = True
+                        try:
+                            if tracer:
+                                tracer.event("provider_stream_start")
+                            response_stream = client.chat.completions.create(**params)
+                            break
+                        except Exception:
+                            continue
+                    if response_stream is not None and hasattr(response_stream, "__iter__"):
+                        collected = []
+                        token_count = 0
+                        first_token_ts = None
+                        for chunk in response_stream:
+                            if not chunk or not getattr(chunk, 'choices', None):
+                                continue
+                            delta = getattr(chunk.choices[0].delta, 'content', None)
+                            if delta:
+                                if first_token_ts is None:
+                                    first_token_ts = perf_counter()
+                                    if tracer:
+                                        tracer.event("stream_first_token")
+                                collected.append(delta)
+                                token_count += len(delta.split())  # rough proxy; real tokens require tokenizer
+                                if partial_callback:
+                                    try:
+                                        partial_callback(delta)
+                                    except Exception:  # pragma: no cover
+                                        pass
+                        content_joined = "".join(collected).strip()
+                        if tracer and first_token_ts is not None:
+                            # Use approximate_token_count for more consistent estimate at end
+                            try:
+                                total_tokens = approximate_token_count(content_joined)
+                            except Exception:
+                                total_tokens = token_count if token_count else len(content_joined.split())
+                            elapsed_tokens_s = perf_counter() - first_token_ts
+                            if elapsed_tokens_s > 0:
+                                tracer.event(
+                                    "stream_complete",
+                                    {
+                                        "approx_tokens": total_tokens,
+                                        "tokens_per_sec": round(total_tokens / elapsed_tokens_s, 2),
+                                        "chars": len(content_joined),
+                                        "elapsed_s": round(elapsed_tokens_s, 3),
+                                    },
+                                )
+                        return {"message": {"content": content_joined}, "streamed": True}
+                except Exception as stream_exc:  # pragma: no cover
+                    logger.warning(f"Streaming fallback to non-stream due to error: {stream_exc}")
+                    if tracer:
+                        tracer.event("stream_error", {"error": str(stream_exc)[:120]})
+
+            # 6. Function calling handling (non-stream)
+            #  (unchanged logic below)
             # 5. Function calling handling
             if response.choices and response.choices[0].message and response.choices[0].message.tool_calls:
                 tool_results = []
@@ -419,6 +547,54 @@ def extract_json(text: str) -> str:
     return text
 
 
+# ------------------------------------------------------------------ token util ---
+
+_tiktoken_encoder = None  # lazy global cache
+
+def approximate_token_count(text: str) -> int:
+    """Approximate token count.
+
+    Tries to use tiktoken if available (same heuristic as OpenAI tokenization for
+    many models). Falls back to a simple whitespace split *  (with a rough scaling
+    for languages with longer average word/token ratios).
+    """
+    global _tiktoken_encoder
+    if not text:
+        return 0
+    # Try tiktoken once
+    if _tiktoken_encoder is None:
+        try:  # pragma: no cover - optional dependency
+            import tiktoken  # type: ignore
+            # Use cl100k_base which matches most gpt-3.5/4 style models
+            _tiktoken_encoder = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            _tiktoken_encoder = False  # sentinel meaning unavailable
+    if _tiktoken_encoder and _tiktoken_encoder is not False:
+        try:
+            return len(_tiktoken_encoder.encode(text))
+        except Exception:  # pragma: no cover - fallback safety
+            pass
+    # Fallback heuristic: word count *  (English ~0.75 ratio; we keep simple)
+    wc = len(text.split())
+    return max(1, wc)
+
+
+def approximate_token_count_for_model(model: str, text: str) -> int:
+    """Model-aware wrapper (future extension point).
+
+    For now delegates to approximate_token_count, but allows plugging in
+    specialized encoders per model family (e.g., llama, mistral) later.
+    """
+    if not text:
+        return 0
+    # Simple heuristic: OpenAI GPT families -> use approximate_token_count (tiktoken if available)
+    lower = model.lower()
+    if any(prefix in lower for prefix in ("gpt-", "o", "openai")):
+        return approximate_token_count(text)
+    # Default
+    return approximate_token_count(text)
+
+
 # ---------------------------------------------------------------- refiner ----
 
 
@@ -445,6 +621,42 @@ async def refine_query(query: str, detected_language: str = "Polish") -> str:
         logger.error("refine_query error: %s", exc)
         return query
 
+# ---------------------------------------------------------------- prompt cache ---
+
+@lru_cache(maxsize=128)
+def _cached_system_prompt(
+    system_prompt_override: str | None,
+    detected_language: str | None,
+    language_confidence: float | None,
+    tools_desc_hash: str,
+    active_window_title: str | None,
+    track_active_window_setting: bool,
+    user_name: str | None,
+    funcs_count: int,
+) -> str:
+    """Build (and cache) system prompt.
+
+    We hash tools description outside to keep the cache key small. Active window
+    title only influences prompt if tracking flag is True; we still include it in the key
+    (hashed implicitly via string) to avoid stale context.
+    """
+    # We can't reconstruct tools description from hash, but the content only impacts
+    # final prompt text; collisions on short hash slice are extremely unlikely for our use.
+    # (If needed we can store mapping hash->original in future.)
+    from templates.prompt_builder import build_full_system_prompt  # local import to avoid cycles
+    # For tools_description we just indicate count; detailed list often large and mostly static for run.
+    tools_description = f"{funcs_count} functions available" if funcs_count else ""
+    return build_full_system_prompt(
+        system_prompt_override=system_prompt_override,
+        detected_language=detected_language,
+        language_confidence=language_confidence,
+        tools_description=tools_description,
+        active_window_title=active_window_title,
+        track_active_window_setting=track_active_window_setting,
+        tool_suggestion=None,
+        user_name=user_name,
+    )
+
 
 # ---------------------------------------------------------------- chat glue --
 
@@ -459,6 +671,9 @@ async def chat_with_providers(
     function_calling_system=None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    tracer: LatencyTracer | None = None,
+    stream: bool = False,
+    partial_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any | None]:
     providers = get_ai_providers()
     selected = (provider_override or PROVIDER).lower()
@@ -477,12 +692,14 @@ async def chat_with_providers(
             check_fn = prov.get("check")
             if callable(check_fn) and check_fn():
                 logger.info(f"✅ Provider {provider_name} check passed")
+                if tracer:
+                    tracer.event("provider_check_pass", {"provider": provider_name})
 
                 # Handle different providers with appropriate parameters
                 chat_func = prov.get("chat")
-
                 if provider_name == "openai":
-                    # OpenAI supports function calling
+                    if tracer:
+                        tracer.event("provider_request_start", {"provider": provider_name})
                     result = await chat_func(  # type: ignore[misc]
                         model,
                         messages,
@@ -491,9 +708,15 @@ async def chat_with_providers(
                         function_calling_system,
                         temperature=temperature,
                         max_tokens=max_tokens,
+                        stream=stream,
+                        tracer=tracer,
+                        partial_callback=partial_callback,
                     )
+                    if tracer:
+                        tracer.event("provider_request_end", {"provider": provider_name})
                 else:
-                    # Sync providers (ollama, lmstudio)
+                    if tracer:
+                        tracer.event("provider_request_start", {"provider": provider_name})
                     result = chat_func(
                         model,
                         messages,
@@ -501,6 +724,8 @@ async def chat_with_providers(
                         temperature=temperature,
                         max_tokens=max_tokens,
                     ) if callable(chat_func) else None
+                    if tracer:
+                        tracer.event("provider_request_end", {"provider": provider_name})
 
                 logger.info(f"✅ Provider {provider_name} returned result")
                 if isinstance(result, dict):
@@ -514,9 +739,13 @@ async def chat_with_providers(
 
     # najpierw preferowany
     if provider_cfg:
+        if tracer:
+            tracer.event("provider_primary_try", {"provider": selected})
         resp = await _try(selected)
         if resp:
             logger.info(f"✅ Using preferred provider: {selected}")
+            if tracer:
+                tracer.event("provider_primary_success", {"provider": selected})
             return resp
     else:
         logger.warning(f"❌ Selected provider {selected} not found in providers")
@@ -524,9 +753,13 @@ async def chat_with_providers(
     # fallback‑i
     logger.warning(f"⚠️ Preferred provider {selected} failed, trying fallbacks...")
     for name in [n for n in providers.providers if n != selected]:
+        if tracer:
+            tracer.event("provider_fallback_try", {"provider": name})
         resp = await _try(name)
         if resp:
             logger.info("✅ Fallback provider %s zadziałał.", name)
+            if tracer:
+                tracer.event("provider_fallback_success", {"provider": name})
             return resp
 
     # total failure
@@ -539,6 +772,8 @@ async def chat_with_providers(
         },
         ensure_ascii=False,
     )
+    if tracer:
+        tracer.event("provider_all_failed")
     return {"message": {"content": error_payload}}
 
 
@@ -608,6 +843,10 @@ async def generate_response(
     use_function_calling: bool = True,
     user_name: Optional[str] = None,
     model_override: Optional[str] = None,
+    tracking_id: Optional[str] = None,
+    enable_latency_trace: bool = True,
+    stream: bool = False,
+    partial_callback: Callable[[str], None] | None = None,
 ) -> str:
     """Generates a response from the AI model based on conversation history and
     available tools. Can use either traditional prompt-based approach or OpenAI Function
@@ -625,11 +864,7 @@ async def generate_response(
         use_function_calling: Whether to use OpenAI Function Calling or traditional approach.    Returns:
         A string containing the AI's response, potentially in JSON format for commands.
     """
-    import datetime
-    # (Legacy initialization block removed; API key resolution handled later)
-
-    """Generate AI response (supports optional OpenAI function calling)."""
-    import datetime
+    import datetime  # (Legacy initialization block removed; API key resolution handled later)
 
     def log_append(lines: list[str]):  # small helper to centralize logging writes
         try:
@@ -639,6 +874,8 @@ async def generate_response(
         except Exception as log_exc:  # pragma: no cover
             logger.warning(f"[PromptLog] Failed to append log: {log_exc}")
 
+    tracer = LatencyTracer(tracking_id, enabled=enable_latency_trace and LATENCY_TRACE_ENABLED)
+    tracer.event("generate_response_start")
     try:
         # 1. API key resolution
         api_key = env_manager.get_api_key("openai") if env_manager else None
@@ -646,6 +883,7 @@ async def generate_response(
             cfg = load_config()
             api_key = cfg.get("api_keys", {}).get("openai") or os.getenv("OPENAI_API_KEY")
         if not api_key:
+            tracer.event("api_key_missing")
             return json.dumps({
                 "text": "Błąd: Klucz API OpenAI nie został skonfigurowany.",
                 "command": "",
@@ -656,23 +894,34 @@ async def generate_response(
         function_calling_system = None
         functions = None
         if use_function_calling and PROVIDER.lower() == "openai":
-            from core.function_calling_system import FunctionCallingSystem
-            function_calling_system = FunctionCallingSystem()
+            from core.function_calling_system import get_function_calling_system
+            function_calling_system = get_function_calling_system()
+            if tracer:
+                tracer.event("function_system_singleton", {"cached": True})
             functions = function_calling_system.convert_modules_to_functions()
             if not functions:
                 function_calling_system = None
+        tracer.event("functions_prepared", {"count": len(functions) if functions else 0})
 
-        # 3. Build system prompt
-        system_prompt = build_full_system_prompt(
-            system_prompt_override=system_prompt_override,
-            detected_language=detected_language,
-            language_confidence=language_confidence,
-            tools_description="" if functions else tools_info,
-            active_window_title=active_window_title,
-            track_active_window_setting=track_active_window_setting,
-            tool_suggestion=tool_suggestion,
-            user_name=user_name,
+        # 3. Build system prompt using module-level LRU cache
+        ov_hash = hashlib.sha256(system_prompt_override.encode("utf-8")).hexdigest()[:16] if system_prompt_override else "noovr"
+        tools_desc_hash = hashlib.sha256((tools_info if tools_info else "").encode("utf-8")).hexdigest()[:12]
+        funcs_count = len(functions) if functions else 0
+        cache_start = perf_counter()
+        system_prompt = _cached_system_prompt(
+            system_prompt_override,
+            detected_language,
+            language_confidence,
+            tools_desc_hash,
+            active_window_title if track_active_window_setting else None,
+            track_active_window_setting,
+            user_name,
+            funcs_count,
         )
+        build_ms = (perf_counter() - cache_start) * 1000
+        cached = build_ms < 1.2  # heuristic threshold ~1ms for cache hit
+        tracer.event("system_prompt_built", {"chars": len(system_prompt), "cached": cached, "build_ms": round(build_ms,2), "funcs": funcs_count})
+        tracer.event(f"prompt_cache_{'hit' if cached else 'miss'}", {"build_ms": round(build_ms,2), "funcs": funcs_count})
 
         # 4. Prepare messages
         messages = list(conversation_history)
@@ -692,12 +941,17 @@ async def generate_response(
 
         # 6. Call provider orchestration
         model_to_use = (model_override or MAIN_MODEL).strip()
+        tracer.event("provider_call_begin")
         resp = await chat_with_providers(
             model_to_use,
             messages,
             functions=functions,
             function_calling_system=function_calling_system,
+            tracer=tracer,
+            stream=stream,
+            partial_callback=partial_callback,
         )
+        tracer.event("provider_call_end")
 
         # 7. Extract content
         content = ""
@@ -716,12 +970,15 @@ async def generate_response(
                         alt_provider = prov_name
                         break
                 if alt_provider:
+                    tracer.event("fallback_attempt", {"provider": alt_provider})
                     resp_alt = await chat_with_providers(
                         model_to_use,
                         messages,
                         provider_override=alt_provider,
                         functions=functions,
                         function_calling_system=function_calling_system,
+                        tracer=tracer,
+                        partial_callback=partial_callback,
                     )
                     if isinstance(resp_alt, dict):
                         msg_obj2 = resp_alt.get("message")
@@ -730,8 +987,10 @@ async def generate_response(
                             if content2:
                                 content = content2
                                 fallback_used = True
+                                tracer.event("fallback_success", {"provider": alt_provider})
             except Exception as fb_exc:  # pragma: no cover
                 logger.warning(f"Fallback provider attempt failed: {fb_exc}")
+                tracer.event("fallback_error", {"error": str(fb_exc)[:200]})
         if not content:
             # Natural assistant-style fallback (voice oriented)
             content = (
@@ -739,9 +998,11 @@ async def generate_response(
                 + ("wcześniej użyłem alternatywnego dostawcy." if fallback_used else "próbowałem głównego dostawcy.")
             )
             logger.warning("Generated natural fallback due to empty model output (fallback_used=%s)", fallback_used)
+            tracer.event("content_empty_fallback_generated", {"fallback_used": fallback_used})
 
         # 8. Clarification branch
         if resp and resp.get("clarification_request"):
+            tracer.event("clarification_request")
             return json.dumps({
                 "text": content,
                 "command": "",
@@ -767,6 +1028,7 @@ async def generate_response(
                     "function_calls_executed": True,
                     "tools_used": resp.get("tool_calls_executed", 0),
                 }
+            tracer.event("function_calls_executed", {"tools_used": resp.get("tool_calls_executed", 0)})
             return json.dumps(content_json, ensure_ascii=False)
 
         # 10. Traditional JSON attempt
@@ -779,14 +1041,21 @@ async def generate_response(
             pass
 
         # 11. Fallback wrap
-        return json.dumps({"text": content, "command": "", "params": {}}, ensure_ascii=False)
+        # Token / length metrics (final path)
+        approx_tokens = len(content.split())
+        tracer.event("return_normal", {"chars": len(content), "approx_tokens": approx_tokens})
+        return json.dumps({"text": content, "command": "", "params": {}, "approx_tokens": approx_tokens}, ensure_ascii=False)
     except Exception as exc:  # pragma: no cover
         logger.error("generate_response error: %s", exc, exc_info=True)
+        tracer.event("error", {"error": str(exc)[:200]})
         return json.dumps({
             "text": "Przepraszam, wystąpił błąd podczas generowania odpowiedzi.",
             "command": "",
             "params": {},
         }, ensure_ascii=False)
+    finally:
+        tracer.event("generate_response_end")
+        tracer.flush_to_file()
 
 
 class AIModule:
