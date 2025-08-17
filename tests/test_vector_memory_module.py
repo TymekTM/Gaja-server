@@ -10,7 +10,17 @@ def fresh_db(tmp_path, monkeypatch):
     db_path = tmp_path / "test_vectors.db"
     # Reinitialize database manager with temp path
     initialize_database_manager(str(db_path))
-    yield get_database_manager()
+    db = get_database_manager()
+    
+    # Create test user for foreign key constraints
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, email, password_hash, is_active) VALUES (?, ?, ?, '', 1)",
+            (1, "test_user", "test@example.com")
+        )
+        conn.commit()
+    
+    yield db
 
 
 @pytest.fixture()

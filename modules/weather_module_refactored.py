@@ -274,10 +274,29 @@ class WeatherModule(BaseModule, TestModeSupport):
         try:
             if self.db_manager:
                 # Convert user_id to int as database expects it
-                user_id_int = int(user_id) if isinstance(user_id, str) else user_id
+                try:
+                    user_id_int = int(user_id) if isinstance(user_id, str) else user_id
+                except ValueError:
+                    # If user_id is not a number, try to find user by username
+                    user = self.db_manager.get_user(username=user_id)
+                    if user:
+                        user_id_int = user.id
+                    else:
+                        # Create user if doesn't exist
+                        user_id_int = self.db_manager.create_user(user_id)
+                        self.logger.info(f"Created user {user_id} with ID: {user_id_int}")
+                
                 api_key = self.db_manager.get_user_api_key(user_id_int, provider)
                 if api_key:
                     return api_key
+            
+            # Fallback to system environment variables
+            import os
+            if provider == "openweather":
+                env_key = os.getenv("OPENWEATHER_API_KEY")
+                if env_key:
+                    return env_key
+            
             return ""
         except Exception as e:
             self.logger.warning(f"Failed to get API key for {provider}: {e}")

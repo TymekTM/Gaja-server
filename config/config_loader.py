@@ -73,7 +73,7 @@ def create_default_config() -> dict[str, Any]:
         },
         "plugins": {
             "auto_load": True,
-            "default_enabled": ["weather_module", "search_module"],
+            "default_enabled": ["weather_module_refactored", "search_module"],
         },
         "logging": {"level": "INFO", "file": "logs/server_{time:YYYY-MM-DD}.log"},
         "ui_language": "en",
@@ -132,7 +132,151 @@ class ConfigLoader:
             self.load()
         if self._config is None:
             self._config = create_default_config()
+        
+        # Support dotted notation like 'app.name'
+        if '.' in key:
+            keys = key.split('.')
+            value = self._config
+            for k in keys:
+                if isinstance(value, dict) and k in value:
+                    value = value[k]
+                else:
+                    return default
+            return value
+        
         return self._config.get(key, default)
+    
+    def set(self, key: str, value: Any):
+        """Ustaw wartość w konfiguracji."""
+        if self._config is None:
+            self.load()
+        if self._config is None:
+            self._config = create_default_config()
+        
+        # Support dotted notation like 'app.name'
+        if '.' in key:
+            keys = key.split('.')
+            config = self._config
+            for k in keys[:-1]:
+                if k not in config:
+                    config[k] = {}
+                config = config[k]
+            config[keys[-1]] = value
+        else:
+            self._config[key] = value
+    
+    def has(self, key: str) -> bool:
+        """Sprawdź czy klucz istnieje."""
+        if self._config is None:
+            self.load()
+        if self._config is None:
+            self._config = create_default_config()
+        
+        # Support dotted notation like 'app.name'
+        if '.' in key:
+            keys = key.split('.')
+            value = self._config
+            for k in keys:
+                if isinstance(value, dict) and k in value:
+                    value = value[k]
+                else:
+                    return False
+            return True
+        
+        return key in self._config
+    
+    def delete(self, key: str):
+        """Usuń klucz z konfiguracji."""
+        if self._config is None:
+            self.load()
+        if self._config is None:
+            self._config = create_default_config()
+        
+        # Support dotted notation like 'app.name'
+        if '.' in key:
+            keys = key.split('.')
+            config = self._config
+            for k in keys[:-1]:
+                if isinstance(config, dict) and k in config:
+                    config = config[k]
+                else:
+                    return
+            if isinstance(config, dict) and keys[-1] in config:
+                del config[keys[-1]]
+        else:
+            if key in self._config:
+                del self._config[key]
+    
+    def to_dict(self) -> dict[str, Any]:
+        """Zwróć konfigurację jako słownik."""
+        if self._config is None:
+            self.load()
+        if self._config is None:
+            self._config = create_default_config()
+        return self._config.copy()
+    
+    def merge(self, other_config: dict[str, Any]):
+        """Połącz z inną konfiguracją."""
+        if self._config is None:
+            self.load()
+        if self._config is None:
+            self._config = create_default_config()
+        
+        def deep_merge(base: dict, update: dict):
+            for key, value in update.items():
+                if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+                    deep_merge(base[key], value)
+                else:
+                    base[key] = value
+        
+        deep_merge(self._config, other_config)
+    
+    def load_from_file(self, file_path: str):
+        """Załaduj konfigurację z pliku."""
+        self.config_file = file_path
+        self.load()
+    
+    def save_to_file(self, file_path: str):
+        """Zapisz konfigurację do pliku."""
+        if self._config is None:
+            self._config = create_default_config()
+        save_config(self._config, file_path)
+    
+    def load_from_env(self, prefix: str = "GAJA_"):
+        """Załaduj ustawienia ze zmiennych środowiskowych."""
+        if self._config is None:
+            self._config = create_default_config()
+        
+        for key, value in os.environ.items():
+            if key.startswith(prefix):
+                config_key = key[len(prefix):].lower().replace('_', '.')
+                # Try to convert to appropriate type
+                if value.lower() in ('true', 'false'):
+                    value = value.lower() == 'true'
+                elif value.isdigit():
+                    value = int(value)
+                else:
+                    # Try to convert to float only if it's a valid float
+                    try:
+                        # Check if it's a valid float (single decimal point)
+                        if '.' in value and value.count('.') == 1:
+                            parts = value.split('.')
+                            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                                value = float(value)
+                    except ValueError:
+                        pass  # Keep as string
+                
+                self.set(config_key, value)
+    
+    @property
+    def config_data(self):
+        """Get config data."""
+        return self.get_config()
+    
+    @config_data.setter
+    def config_data(self, value):
+        """Set config data."""
+        self._config = value
 
 
 # Stare zmienne dla kompatybilności

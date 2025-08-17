@@ -16,18 +16,16 @@ from functools import lru_cache
 from typing import Any, List, Optional
 
 import numpy as np
-
-try:  # Optional dependency; openai is in requirements
-    from openai import OpenAI  # type: ignore
-except Exception:  # pragma: no cover
-    OpenAI = None  # type: ignore
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 from config.config_manager import get_database_manager
 
 logger = logging.getLogger(__name__)
 
-EMBED_MODEL = "text-embedding-nomic-embed-text-v1.5"
-FALLBACK_DIM = 768
+EMBED_MODEL = "tfidf"  # Local TF-IDF based embeddings
+EMBED_DIM = 384  # Fixed dimension for consistency
+FALLBACK_DIM = 384
 
 
 class VectorMemoryModule:
@@ -39,27 +37,55 @@ class VectorMemoryModule:
 
     def __init__(self):
         self.db = get_database_manager()
-        self._client = None
-        if OpenAI and os.getenv("OPENAI_API_KEY"):
-            try:
-                self._client = OpenAI()
-            except Exception as e:  # pragma: no cover
-                logger.warning(f"Failed to init OpenAI client, using fallback embeddings: {e}")
+        self._vectorizer = None
+        self._fitted_docs = []
+        
+        # Initialize TF-IDF vectorizer for local embeddings
+        try:
+            logger.info("Initializing local TF-IDF embedding system")
+            self._vectorizer = TfidfVectorizer(
+                max_features=EMBED_DIM,
+                stop_words='english',
+                ngram_range=(1, 2),
+                min_df=1,
+                max_df=1.0  # Allow all document frequencies for small corpus
+            )
+            logger.info("Local TF-IDF embedding system initialized")
+        except Exception as e:  # pragma: no cover
+            logger.warning(f"Failed to initialize TF-IDF vectorizer, using fallback: {e}")
 
     # ---------------- Embedding generation -----------------
     def _get_embedding(self, text: str) -> List[float]:
         text = (text or "").strip()
         if not text:
-            return [0.0] * FALLBACK_DIM
-        # Try remote embedding first
-        if self._client:
+            return [0.0] * EMBED_DIM
+            
+        # Try TF-IDF embedding first
+        if self._vectorizer:
             try:
-                resp = self._client.embeddings.create(model=EMBED_MODEL, input=text)
-                emb = resp.data[0].embedding  # type: ignore[attr-defined]
-                # Ensure it's a list[float]
-                return list(map(float, emb))
-            except Exception as e:  # pragma: no cover - network / API issues
-                logger.warning(f"Embedding API failed, fallback vector used: {e}")
+                # Update corpus and refit if needed
+                if text not in self._fitted_docs:
+                    self._fitted_docs.append(text)
+                    
+                # Refit vectorizer with updated corpus
+                if len(self._fitted_docs) >= 1:
+                    self._vectorizer.fit(self._fitted_docs)
+                    
+                # Generate TF-IDF vector for the text
+                tfidf_vector = self._vectorizer.transform([text])
+                dense_vector = tfidf_vector.toarray()[0]
+                
+                # Pad or truncate to exact dimension
+                if len(dense_vector) < EMBED_DIM:
+                    padded = np.zeros(EMBED_DIM)
+                    padded[:len(dense_vector)] = dense_vector
+                    return padded.tolist()
+                else:
+                    return dense_vector[:EMBED_DIM].tolist()
+                    
+            except Exception as e:  # pragma: no cover
+                logger.warning(f"TF-IDF embedding failed, using fallback: {e}")
+                
         # Deterministic fallback embedding
         return self._fallback_embedding(text)
 
@@ -68,7 +94,7 @@ class VectorMemoryModule:
     def _fallback_embedding(text: str) -> List[float]:
         # Simple hashed bag-of-words into fixed dimension then L2 normalize
         import numpy as np  # local import for tests
-        dim = FALLBACK_DIM
+        dim = EMBED_DIM
         vec = np.zeros(dim, dtype=np.float32)
         for token in text.lower().split():
             h = int(hashlib.sha256(token.encode("utf-8")).hexdigest(), 16)

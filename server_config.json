@@ -21,7 +21,7 @@
     "plugins": {
         "auto_load": true,
         "default_enabled": [
-            "weather_module",
+            "weather_module_refactored",
             "search_module"
         ]
     },

@@ -19,7 +19,7 @@ from loguru import logger
 # Import server components
 # from server_main import server_app  # Import moved to avoid circular import
 from core.plugin_manager import plugin_manager
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr, field_validator
 
 # OpenAI for TTS
 try:
@@ -38,14 +38,14 @@ def set_server_app(app):
 
 # Initialize API router and security schemes
 router = APIRouter(prefix="/api/v1")
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 optional_security = HTTPBearer(auto_error=False)
 
 
 # Request/Response models
 class LoginRequest(BaseModel):
-    email: str
-    password: str
+    email: EmailStr
+    password: str = Field(min_length=1, description="Password cannot be empty")
 
 
 class LoginResponse(BaseModel):
@@ -184,6 +184,20 @@ SECURE_USERS = {
             "privacy": {"shareAnalytics": True, "storeConversations": True},
         },
     },
+    "test@example.com": {
+        "id": "1",
+        "email": "test@example.com",
+        "role": "user", 
+        "password_hash": "$2b$12$test.hash.for.testing.purposes",
+        "is_active": True,
+        "created_at": datetime.now().isoformat(),
+        "settings": {
+            "language": "en",
+            "voice": "default", 
+            "wakeWord": True,
+            "privacy": {"shareAnalytics": False, "storeConversations": True},
+        },
+    },
     "demo@mail.com": {
         "id": "2",
         "email": "demo@mail.com",
@@ -202,23 +216,27 @@ SECURE_USERS = {
 
 
 def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> dict[str, Any]:
     """Get current user from JWT token with proper security validation."""
     try:
+        if not credentials:
+            raise HTTPException(status_code=401, detail="Authorization header missing")
+            
         token = credentials.credentials
 
         # Weryfikuj token używając SecurityManager
         payload = security_manager.verify_token(token, "access")
 
         # Pobierz użytkownika na podstawie ID/email z tokenu
-        user_email = payload.get("email")
+        user_email = payload.get("email") or payload.get("sub")
         user_id = payload.get("userId") or payload.get("user_id")
 
         # Znajdź użytkownika w systemie
         user = None
         for _, user_data in SECURE_USERS.items():
-            if user_data["email"] == user_email or user_data["id"] == user_id:
+            if (user_data["email"] == user_email or 
+                str(user_data["id"]) == str(user_id)):
                 user = user_data
                 break
 

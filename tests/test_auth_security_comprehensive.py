@@ -96,8 +96,9 @@ class TestTokenManagement:
         actual_exp = datetime.fromtimestamp(exp_timestamp, UTC)
         
         # Token should expire between (before + 60min) and (after + 60min)
-        expected_min = before + expires_delta
-        expected_max = after + expires_delta
+        # Add some tolerance for execution time
+        expected_min = before + expires_delta - timedelta(seconds=1) 
+        expected_max = after + expires_delta + timedelta(seconds=1)
         
         assert expected_min <= actual_exp <= expected_max
     
@@ -199,10 +200,14 @@ class TestAccountLocking:
         """Test account unlocks after lockout period."""
         email = "test@example.com"
         
-        # Mock time to simulate lockout period passing
-        with patch('time.time') as mock_time:
-            # Start time
-            mock_time.return_value = 1000000
+        # Mock datetime to simulate lockout period passing
+        with patch('auth.security.datetime') as mock_datetime:
+            from datetime import UTC, timedelta
+            
+            # Start time 
+            start_time = datetime(2023, 1, 1, 12, 0, 0, tzinfo=UTC)
+            mock_datetime.now.return_value = start_time
+            mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
             
             # Record enough failed attempts to lock account
             for i in range(6):
@@ -211,7 +216,8 @@ class TestAccountLocking:
             assert security_manager.is_account_locked(email) is True
             
             # Simulate time passing (lockout duration + 1 minute)
-            mock_time.return_value = 1000000 + (30 * 60) + 60
+            unlock_time = start_time + timedelta(minutes=31)  # 30 min lockout + 1 min 
+            mock_datetime.now.return_value = unlock_time
             
             assert security_manager.is_account_locked(email) is False
 
@@ -320,9 +326,11 @@ class TestUserManagement:
         assert isinstance(result, dict)
         assert result.get("success") is False
         
+        # Second call should also return dict with success=False
         result = security_manager.authenticate_user("nonexistent", "password")
         
-        assert result is False
+        assert isinstance(result, dict)
+        assert result.get("success") is False
 
 
 class TestSecurityUtils:

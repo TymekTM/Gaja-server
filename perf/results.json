@@ -1,0 +1,12 @@
+{
+  "startup_seconds": 0.011463600000297447,
+  "health_latency": {
+    "count": 20,
+    "min_ms": 2.88,
+    "p50_ms": 3.16,
+    "p95_ms": 16.63,
+    "max_ms": 17.29,
+    "mean_ms": 5.23
+  },
+  "probes": 20
+}

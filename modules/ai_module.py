@@ -396,6 +396,7 @@ class AIProviders:
             # 5. Function calling handling
             if response.choices and response.choices[0].message and response.choices[0].message.tool_calls:
                 tool_results = []
+                tool_call_details = []  # Track details for fast-path optimization
                 for tool_call in response.choices[0].message.tool_calls:
                     fn_name = tool_call.function.name
                     try:
@@ -427,6 +428,12 @@ class AIProviders:
                             "content": str(exec_result),
                         }
                     )
+                    # Store tool call details for fast-path optimization
+                    tool_call_details.append({
+                        "name": fn_name,
+                        "arguments": fn_args,
+                        "result": exec_result
+                    })
 
                 # Augment conversation
                 messages.append(
@@ -446,6 +453,46 @@ class AIProviders:
                         ],
                     }
                 )
+                
+                # FAST PATH: Check if we can skip the second OpenAI call
+                fast_tool_mode = os.getenv("GAJA_FAST_TOOL_MODE", "1") not in ("0","false","False")
+                if fast_tool_mode and len(tool_call_details) == 1:
+                    detail = tool_call_details[0]
+                    tool_name = detail.get("name", "") if isinstance(detail, dict) else ""
+                    tool_result = detail.get("result") if isinstance(detail, dict) else None
+                    if tool_name.lower().startswith("weather") and isinstance(tool_result, dict):
+                        logger.warning(f"🚀 FAST PATH WEATHER ACTIVATED! Tool: {tool_name}")
+                        if tracer:
+                            tracer.event("fast_tool_path_weather")
+                        # Build concise natural language summary
+                        try:
+                            loc = tool_result.get("data", {}).get("location", {})
+                            curr = tool_result.get("data", {}).get("current", {})
+                            forecast = tool_result.get("data", {}).get("forecast", [])
+                            location_text = loc.get("name") or "(lokalizacja)"
+                            desc = curr.get("description", "")
+                            temp = curr.get("temperature")
+                            feels = curr.get("feels_like")
+                            summary = f"Pogoda w {location_text}: {desc}, {temp}°C (odczuwalna {feels}°C)."
+                            if forecast and isinstance(forecast, list):
+                                first = forecast[0]
+                                if isinstance(first, dict):
+                                    summary += f" Dziś min {first.get('min_temp')}°C / max {first.get('max_temp')}°C."
+                            fast_payload = {
+                                "message": {"content": summary},
+                                "tool_calls_executed": len(tool_call_details),
+                                "tool_call_details": tool_call_details,
+                                "fast_tool_path": True,
+                            }
+                            logger.warning(f"🚀 FAST PATH SUCCESS: {summary[:50]}...")
+                            if tracer:
+                                tracer.event("fast_tool_response_ready", {"chars": len(summary)})
+                            return fast_payload
+                        except Exception as ft_exc:
+                            logger.warning(f"🚀 FAST PATH ERROR: {ft_exc}")
+                            if tracer:
+                                tracer.event("fast_tool_path_error", {"error": str(ft_exc)[:160]})
+
                 messages.extend(tool_results)
 
                 # Second pass with tool outputs
@@ -466,6 +513,7 @@ class AIProviders:
                 return {
                     "message": {"content": final_response.choices[0].message.content},
                     "tool_calls_executed": len(tool_results),
+                    "tool_call_details": tool_call_details,
                 }
 
             # Normal path: extract content, guard against None/empty
@@ -847,7 +895,7 @@ async def generate_response(
     enable_latency_trace: bool = True,
     stream: bool = False,
     partial_callback: Callable[[str], None] | None = None,
-) -> str:
+) -> str | dict[str, Any]:
     """Generates a response from the AI model based on conversation history and
     available tools. Can use either traditional prompt-based approach or OpenAI Function
     Calling.
@@ -939,7 +987,7 @@ async def generate_response(
             log_lines.append(f"{ts} | {json.dumps({'role':'system','content': f'Available functions: {len(functions)}'}, ensure_ascii=False)}")
         log_append(log_lines)
 
-        # 6. Call provider orchestration
+    # 6. Call provider orchestration (FIRST MODEL CALL)
         model_to_use = (model_override or MAIN_MODEL).strip()
         tracer.event("provider_call_begin")
         resp = await chat_with_providers(
@@ -955,7 +1003,15 @@ async def generate_response(
 
         # 7. Extract content
         content = ""
+        fast_tool_path_detected = False
+        fast_tool_path_result = None
         if isinstance(resp, dict):
+            # Check for fast-path weather response
+            if resp.get("fast_tool_path"):
+                fast_tool_path_detected = True
+                fast_tool_path_result = resp
+                logger.warning(f"🚀 FAST PATH DETECTED in generate_response: {resp.get('tool_calls_executed', 0)} tools")
+            
             msg_obj = resp.get("message")
             if isinstance(msg_obj, dict):
                 content = (msg_obj.get("content") or "").strip()
@@ -1000,6 +1056,23 @@ async def generate_response(
             logger.warning("Generated natural fallback due to empty model output (fallback_used=%s)", fallback_used)
             tracer.event("content_empty_fallback_generated", {"fallback_used": fallback_used})
 
+        # 8. Fast-path weather result handling
+        if fast_tool_path_detected and fast_tool_path_result:
+            tracer.event("fast_path_return_from_generate_response")
+            # Build proper JSON response structure for fast path
+            message_obj = fast_tool_path_result.get("message") or {}
+            fast_content = message_obj.get("content", "") if isinstance(message_obj, dict) else ""
+            fast_result = {
+                "text": fast_content,
+                "command": "",
+                "params": {},
+                "fast_tool_path": True,
+                "tools_used": fast_tool_path_result.get("tool_calls_executed", 0),
+                "tool_call_details": fast_tool_path_result.get("tool_call_details", [])
+            }
+            logger.warning(f"🚀 FAST PATH RETURN from generate_response: tools={fast_result.get('tools_used', 0)}")
+            return json.dumps(fast_result, ensure_ascii=False)  # Return JSON string!
+
         # 8. Clarification branch
         if resp and resp.get("clarification_request"):
             tracer.event("clarification_request")
@@ -1014,6 +1087,7 @@ async def generate_response(
 
         # 9. Function calling result normalization
         if use_function_calling and functions and resp.get("tool_calls_executed"):
+            tracer.event("tool_calls_detected", {"count": resp.get("tool_calls_executed")})
             try:
                 parsed_content = json.loads(content)
                 if isinstance(parsed_content, dict) and "text" in parsed_content:
@@ -1065,6 +1139,15 @@ class AIModule:
         self.config = config
         self.providers = get_ai_providers()
         self._conversation_history = {}
+        # Optional pre-warm of weather module to avoid first-call latency
+        if os.getenv("GAJA_PREWARM_WEATHER", "1") not in ("0","false","False"):
+            try:
+                # Delay import until here
+                from modules.weather_module import WeatherModule  # type: ignore
+                self._weather_module = WeatherModule()
+                logger.debug("Pre-warmed WeatherModule instance")
+            except Exception as pw_exc:  # pragma: no cover
+                logger.debug(f"WeatherModule pre-warm skipped: {pw_exc}")
 
     async def process_query(self, query: str, context: dict) -> dict:
         try:
@@ -1100,18 +1183,37 @@ class AIModule:
                 user_name=context.get("user_name", "User"),
                 model_override=force_model,
             )
-            try:
-                parsed_resp = json.loads(response)
-                if isinstance(parsed_resp, dict) and parsed_resp.get("requires_user_response"):
-                    return {
-                        "type": "clarification_request",
-                        "response": response,
-                        "clarification_data": parsed_resp.get("clarification_data"),
-                        "requires_user_response": True,
-                    }
-            except Exception:
-                pass
-            return {"type": "normal_response", "response": response}
+            
+            # Check if response is fast-path dict
+            if isinstance(response, dict) and response.get("fast_tool_path"):
+                logger.warning(f"🚀 FAST PATH RESPONSE in process_query: tools={response.get('tool_calls_executed', 0)}")
+                # Convert back to JSON string for consistent interface
+                content = response.get("response_content", "")
+                return {
+                    "type": "normal_response",
+                    "response": content,
+                    "fast_tool_path": True,
+                    "tool_calls_executed": response.get("tool_calls_executed", 0),
+                    "tool_call_details": response.get("tool_call_details", [])
+                }
+            
+            # Normal string response processing
+            if isinstance(response, str):
+                try:
+                    parsed_resp = json.loads(response)
+                    if isinstance(parsed_resp, dict) and parsed_resp.get("requires_user_response"):
+                        return {
+                            "type": "clarification_request",
+                            "response": response,
+                            "clarification_data": parsed_resp.get("clarification_data"),
+                            "requires_user_response": True,
+                        }
+                except Exception:
+                    pass
+                return {"type": "normal_response", "response": response}
+            
+            # Fallback for unexpected response type
+            return {"type": "normal_response", "response": str(response)}
         except Exception as e:
             logger.error(f"Error processing AI query: {e}")
             err = json.dumps({

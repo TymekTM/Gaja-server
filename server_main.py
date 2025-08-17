@@ -130,6 +130,9 @@ class ServerApp:
                 query = data.get("query", "")
                 context = data.get("context", {})
 
+                # DEBUG: Log actual user query to debug inappropriate tool calls
+                logger.warning(f"🎯 USER QUERY: '{query}' (type: {message_type})")
+
                 if not query:
                     await self.connection_manager.send_to_user(
                         user_id, WebSocketMessage("error", {"message": "Empty query"})
@@ -164,6 +167,62 @@ class ServerApp:
                     logger.info(
                         f"AI module returned result type: {ai_result.get('type', 'unknown')}"
                     )
+                    
+                    # DEBUG: Log ai_result keys for fast-path debugging
+                    logger.warning(f"🔍 AI RESULT KEYS: {list(ai_result.keys()) if isinstance(ai_result, dict) else 'not dict'}")
+                    if ai_result.get("fast_tool_path"):
+                        logger.warning(f"🚀 AI RESULT HAS FAST_TOOL_PATH: {ai_result.get('fast_tool_path')}")
+
+                    # ------------------------------------------------------------------
+                    # (Eksperymentalne) Wczesne strumieniowanie audio – tryb stub
+                    # Jeśli ustawiono GAJA_AUDIO_STREAM_STUB=1 wysyłamy natychmiast
+                    # po otrzymaniu tekstu AI mały chunk audio (sztuczny), aby klient
+                    # mógł zmierzyć 'time-to-first-audio-token' zanim właściwe TTS
+                    # zostanie wygenerowane. Finalna odpowiedź przyjdzie później jako
+                    # standardowe "ai_response" (z pełnym tts_audio) – ten fragment nie
+                    # zmienia istniejącego zachowania gdy zmienna nie jest ustawiona.
+                    # ------------------------------------------------------------------
+                    audio_stream_stub_enabled = os.getenv("GAJA_AUDIO_STREAM_STUB", "0").lower() in ("1", "true", "yes")
+                    logger.warning(f"🎵 AUDIO STREAM STUB: enabled={audio_stream_stub_enabled}")
+
+                    # Tekst będzie potrzebny – spróbuj wydobyć z ai_result.response
+                    early_text = None
+                    if audio_stream_stub_enabled and ai_result.get("type") == "normal_response":
+                        try:
+                            resp_payload = ai_result.get("response")
+                            if isinstance(resp_payload, str):
+                                # Check if it's a fast-path plain text response
+                                if ai_result.get("fast_tool_path"):
+                                    early_text = resp_payload  # Fast-path returns plain text
+                                    logger.debug("Using fast-path response as early_text")
+                                else:
+                                    # Regular JSON response parsing
+                                    parsed_payload = json.loads(resp_payload)
+                                    if isinstance(parsed_payload, dict):
+                                        early_text = parsed_payload.get("text")
+                        except Exception:
+                            early_text = None
+                    if audio_stream_stub_enabled and early_text:
+                        try:
+                            # Krótki fałszywy chunk (można później zastąpić prawdziwym strumieniem)
+                            fake_bytes = b"GAJA_STUB_AUDIO_CHUNK"
+                            fake_b64 = base64.b64encode(fake_bytes).decode("utf-8")
+                            await self.connection_manager.send_to_user(
+                                user_id,
+                                WebSocketMessage(
+                                    "tts_chunk",
+                                    {
+                                        "chunk": fake_b64,
+                                        "index": 0,
+                                        "is_final": False,
+                                        "format": "mp3",
+                                        "stub": True,
+                                    },
+                                ),
+                            )
+                            logger.debug("Sent early stub tts_chunk (index=0, stub=True)")
+                        except Exception as stub_err:
+                            logger.debug(f"Failed to send stub tts_chunk: {stub_err}")
 
                     # Handle clarification requests
                     if ai_result.get("type") == "clarification_request":
@@ -253,10 +312,22 @@ class ServerApp:
                     
                     # Send AI response with optional TTS audio
                     response_data = {
-                        "response": response,
                         "query": query,
                         "timestamp": message_data.get("timestamp"),
                     }
+                    
+                    # Handle fast-path responses - wrap plain text in JSON format
+                    if ai_result.get("fast_tool_path") and isinstance(response, str):
+                        # Fast-path returns plain text, wrap it for client compatibility
+                        response_data["response"] = json.dumps({"text": response})
+                        logger.debug(f"🚀 FAST PATH: Wrapped plain text response for client")
+                    else:
+                        # Regular response (already JSON formatted)
+                        response_data["response"] = response
+                    
+                    # Include fast_tool_path if present in ai_result
+                    if ai_result.get("fast_tool_path"):
+                        response_data["fast_tool_path"] = True
                     
                     if tts_audio:
                         response_data["tts_audio"] = base64.b64encode(tts_audio).decode('utf-8')
@@ -275,6 +346,10 @@ class ServerApp:
                         user_id,
                         WebSocketMessage("ai_response", response_data),
                     )
+                    # Opcjonalnie – jeśli stub chunk został wysłany, można (nieobowiązkowo)
+                    # wysłać kończący chunk sygnalizujący koniec strumienia. Na razie jeśli
+                    # istnieje pełne tts_audio, klient dostaje je w ai_response i może sam
+                    # uznać strumień za zakończony.
                     end_server_timer(query_id, "websocket_send")
                     end_server_timer(query_id, "total_server")
                     finish_server_query(query_id)
