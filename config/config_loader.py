@@ -73,7 +73,7 @@ def create_default_config() -> dict[str, Any]:
         },
         "plugins": {
             "auto_load": True,
-            "default_enabled": ["weather_module_refactored", "search_module"],
+            "default_enabled": ["weather_module", "search_module"],
         },
         "logging": {"level": "INFO", "file": "logs/server_{time:YYYY-MM-DD}.log"},
         "ui_language": "en",

@@ -366,26 +366,27 @@ class APIModule:
             return {"error": f"Unsupported search engine: {engine}", "status": 400}
 
     async def get_weather(
-        self, user_id: int, location: str, api_key: str, provider: str = "openweather"
+        self, user_id: int, location: str, api_key: str, provider: str = "weatherapi"
     ) -> dict[str, Any]:
-        """Pobiera prognozę pogody.
+        """Pobiera dane pogodowe.
+
+        NOTE: Legacy OpenWeather support has been removed. Only WeatherAPI provider is supported.
 
         Args:
             user_id: ID użytkownika
             location: Lokalizacja
-            api_key: Klucz API
-            provider: Provider pogodowy
+            api_key: Klucz API WeatherAPI
+            provider: Provider pogodowy (must be 'weatherapi')
 
         Returns:
-            Dane pogodowe
+            Dane pogodowe lub komunikat o błędzie
         """
-        if provider == "openweather":
-            url = "https://api.openweathermap.org/data/2.5/weather"
-            params = {"q": location, "appid": api_key, "units": "metric", "lang": "pl"}
-            return await self.get(user_id, url, params=params)
-
-        else:
+        if provider != "weatherapi":
             return {"error": f"Unsupported weather provider: {provider}", "status": 400}
+
+        url = "http://api.weatherapi.com/v1/current.json"
+        params = {"key": api_key, "q": location, "lang": "pl"}
+        return await self.get(user_id, url, params=params)
 
     async def translate_text(
         self,

@@ -175,8 +175,9 @@ class APIKeyUtils:
             return api_key.startswith("sk-") and len(api_key) > 20
         elif provider == "anthropic":
             return api_key.startswith("sk-ant-") and len(api_key) > 20
-        elif provider == "openweather":
-            return len(api_key) == 32 and api_key.isalnum()
+        elif provider == "weatherapi":
+            # WeatherAPI keys vary in length but usually >= 10 chars alphanumeric
+            return len(api_key) >= 10 and api_key.replace("_", "").isalnum()
         elif provider == "newsapi":
             return len(api_key) == 32 and api_key.isalnum()
         else:

@@ -13,6 +13,7 @@ from typing import Optional
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from websockets.exceptions import ConnectionClosed
 
@@ -723,6 +724,54 @@ app.add_middleware(
 
 # Include API routes
 app.include_router(api_router)
+
+# Serve Admin Panel static assets
+admin_panel_path = Path(__file__).parent / "admin_panel"
+if admin_panel_path.exists():
+    app.mount("/admin/static", StaticFiles(directory=str(admin_panel_path)), name="admin_static")
+
+@app.get("/admin")
+async def admin_index():
+    """Serve Admin Panel index HTML."""
+    index_file = admin_panel_path / "index.html"
+    if not index_file.exists():
+        return {"error": "Admin panel not found"}
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(index_file.read_text(encoding="utf-8"))
+
+
+# Backward compatibility: legacy direct asset paths (old index referenced panel.css/panel.js at root)
+@app.get("/panel.css")
+async def legacy_panel_css():
+    file_path = admin_panel_path / "panel.css"
+    if file_path.exists():
+        from fastapi.responses import FileResponse
+        return FileResponse(str(file_path), media_type="text/css")
+    from fastapi import Response
+    return Response(status_code=404)
+
+@app.get("/panel.js")
+async def legacy_panel_js():
+    file_path = admin_panel_path / "panel.js"
+    if file_path.exists():
+        from fastapi.responses import FileResponse
+        return FileResponse(str(file_path), media_type="application/javascript")
+    from fastapi import Response
+    return Response(status_code=404)
+
+# Debug UI (Test Bench) static assets
+debug_ui_path = Path(__file__).parent / "debug_ui"
+if debug_ui_path.exists():
+    app.mount("/debug/static", StaticFiles(directory=str(debug_ui_path)), name="debug_static")
+
+@app.get("/debug")
+async def debug_index():
+    """Serve Debug Center index HTML."""
+    index_file = debug_ui_path / "index.html"
+    if not index_file.exists():
+        return {"error": "Debug UI not found"}
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(index_file.read_text(encoding="utf-8"))
 
 
 @app.get("/health")

@@ -393,9 +393,14 @@ async def _init_storage():
 
 
 async def _load_storage():
-    """Load storage data from file asynchronously."""
-    try:
+    """Load storage data from file asynchronously.
 
+    Adds corruption recovery: if JSON is invalid (e.g. partial write), the corrupt
+    file is moved aside with a timestamp suffix and a fresh storage file is
+    created so the system can continue operating instead of repeatedly failing
+    (which previously inflated latency in tests).
+    """
+    try:
         def _read_file():
             with open(STORAGE_FILE) as f:
                 return f.read()
@@ -403,7 +408,6 @@ async def _load_storage():
         content = await asyncio.to_thread(_read_file)
         return json.loads(content)
     except FileNotFoundError:
-        # Initialize storage if file doesn't exist
         await _init_storage()
         return {
             "timers": [],
@@ -413,20 +417,45 @@ async def _load_storage():
             "tasks": [],
             "lists": {},
         }
-    except Exception as e:
+    except json.JSONDecodeError as e:  # Corrupted / partial file
+        logger.error(f"Corrupt storage file detected ({e}); attempting automatic recovery.")
+        # Move corrupt file aside
+        try:
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_path = STORAGE_FILE + f".corrupt-{ts}"
+            os.replace(STORAGE_FILE, backup_path)
+            logger.warning(f"Moved corrupt storage to {backup_path}")
+        except Exception as move_exc:
+            logger.warning(f"Failed to move corrupt storage file: {move_exc}")
+        # Reinitialize fresh storage
+        await _init_storage()
+        return {
+            "timers": [],
+            "events": [],
+            "reminders": [],
+            "shopping_list": [],
+            "tasks": [],
+            "lists": {},
+        }
+    except Exception as e:  # Other unexpected errors propagate (still logged)
         logger.error(f"Error loading storage: {e}")
         raise
 
 
 async def _save_storage(data):
-    """Save storage data to file asynchronously."""
+    """Save storage data to file asynchronously with atomic write.
+
+    Writing to a temp file and replacing reduces risk of partial writes leading
+    to JSON corruption (which previously caused repeated JSONDecodeError loops).
+    """
     try:
-
-        def _write_file():
-            with open(STORAGE_FILE, "w") as f:
+        def _write_file_atomic():
+            tmp_path = STORAGE_FILE + ".tmp"
+            with open(tmp_path, "w") as f:
                 json.dump(data, f, indent=2)
+            os.replace(tmp_path, STORAGE_FILE)
 
-        await asyncio.to_thread(_write_file)
+        await asyncio.to_thread(_write_file_atomic)
     except Exception as e:
         logger.error(f"Error saving storage: {e}")
         raise

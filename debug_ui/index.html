@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gaja Debug Center</title>
+    <link rel="stylesheet" href="/debug/static/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <h1>Gaja Debug Center</h1>
+        <div class="meta">
+          <span id="model"></span>
+          <span id="provider"></span>
+        </div>
+      </header>
+      <main>
+        <section class="chat-panel">
+          <div id="chat-log" class="chat-log"></div>
+          <div class="chat-input">
+            <input id="query" type="text" placeholder="Wpisz wiadomość..." />
+            <button id="send">Wyślij</button>
+          </div>
+        </section>
+        <section class="debug-panel">
+          <div class="tabs">
+            <button data-tab="tools" class="tab active">Narzędzia (calls)</button>
+            <button data-tab="trace" class="tab">Trace</button>
+            <button data-tab="available" class="tab">Dostępne funkcje</button>
+          </div>
+          <div class="tab-content">
+            <div id="tab-tools" class="pane active">
+              <ul id="tool-calls" class="list"></ul>
+            </div>
+            <div id="tab-trace" class="pane">
+              <ul id="trace-events" class="list"></ul>
+            </div>
+            <div id="tab-available" class="pane">
+              <ul id="available-tools" class="list"></ul>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/debug/static/app.js"></script>
+  </body>
+  </html>
+

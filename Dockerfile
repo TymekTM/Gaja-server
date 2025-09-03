@@ -1,5 +1,5 @@
 # GAJA Server - Docker Configuration
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Metadata
 LABEL name="gaja-server" \
@@ -32,11 +32,13 @@ COPY . .
 # Create necessary directories
 RUN mkdir -p logs data cache
 
-# Set environment variables
-ENV PYTHONPATH=/app
-ENV PYTHONUNBUFFERED=1
+## Environment variables
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    GAJA_ENV="docker"
+# WEATHERAPI_KEY will be supplied at runtime via -e WEATHERAPI_KEY=... or docker secrets
 
-# Expose port
+# Expose port (application listens on 8001 internally to align with compose mapping)
 EXPOSE 8001
 
 # Health check

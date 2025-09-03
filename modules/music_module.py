@@ -567,3 +567,35 @@ class MusicModule:
                 },
             },
         ]
+
+    async def execute_function(self, function_name: str, parameters: dict[str, Any], user_id: int | str) -> dict[str, Any]:
+        """Unified execute_function API expected by FunctionCallingSystem.
+
+        Maps wrapper function names to underlying control functions. Keeps
+        backwards compatibility with earlier top-level execute_function.
+        """
+        # Normalizacja user_id (nie jest obecnie używany w logice sterowania)
+        try:
+            _uid = int(user_id) if isinstance(user_id, str) and user_id.isdigit() else 0
+        except Exception:  # pragma: no cover – defensywnie
+            _uid = 0
+
+        # play_music jeszcze nie ma dedykowanej implementacji – traktujemy jako control_music/play
+        if function_name == "play_music":
+            song = parameters.get("song")
+            # Jeśli w przyszłości będzie obsługa konkretnych utworów można tu dodać logikę.
+            # Tymczasowo zamieniamy na akcję 'play'.
+            params = {"action": "play", "platform": parameters.get("platform", "auto")}
+            return await execute_function("control_music", params, _uid)
+
+        if function_name == "control_music":
+            return await execute_function("control_music", parameters, _uid)
+
+        if function_name == "get_spotify_status":
+            return await execute_function("get_spotify_status", parameters, _uid)
+
+        return {
+            "success": False,
+            "message": f"Unknown music function: {function_name}",
+            "error": "unknown_function"
+        }

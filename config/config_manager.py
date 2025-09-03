@@ -303,6 +303,25 @@ class DatabaseManager:
             """
             )
 
+            # Tabela urządzeń headless / klientów połączonych w sieci lokalnej
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS devices (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    type TEXT DEFAULT 'headless', -- headless | web | mobile | other
+                    status TEXT DEFAULT 'offline', -- offline | online | error
+                    api_key TEXT UNIQUE, -- klucz używany przez urządzenie do autoryzacji heartbeat / ws
+                    last_seen TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    metadata TEXT DEFAULT '{}'
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_status ON devices (status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_last_seen ON devices (last_seen)")
+
             # Tabela preferencji użytkowników
             conn.execute(
                 """
@@ -1530,6 +1549,113 @@ class DatabaseManager:
             self._local.connection.close()
             delattr(self._local, "connection")
 
+    # === DEVICE MANAGEMENT (Headless / Local devices) ===
+
+    def create_device(self, name: str, device_type: str = "headless", metadata: dict | None = None) -> dict[str, Any] | None:
+        """Creates a new device with generated api_key."""
+        import secrets
+        api_key = secrets.token_hex(16)
+        meta_json = json.dumps(metadata or {})
+        with self.get_db_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO devices (name, type, status, api_key, last_seen, metadata)
+                VALUES (?, ?, 'offline', ?, CURRENT_TIMESTAMP, ?)
+                """,
+                (name, device_type, api_key, meta_json)
+            )
+            device_id = cursor.lastrowid
+            return {"id": device_id, "name": name, "type": device_type, "status": "offline", "api_key": api_key, "metadata": metadata or {}}
+
+    def list_devices(self) -> list[dict[str, Any]]:
+        with self.get_db_connection() as conn:
+            cursor = conn.execute("SELECT id, name, type, status, api_key, last_seen, created_at, updated_at, metadata FROM devices ORDER BY created_at DESC")
+            devices = []
+            for row in cursor.fetchall():
+                try:
+                    meta = json.loads(row[8]) if row[8] else {}
+                except Exception:
+                    meta = {}
+                devices.append({
+                    "id": row[0],
+                    "name": row[1],
+                    "type": row[2],
+                    "status": row[3],
+                    "api_key": row[4],
+                    "last_seen": row[5],
+                    "created_at": row[6],
+                    "updated_at": row[7],
+                    "metadata": meta
+                })
+            return devices
+
+    def get_device(self, device_id: int | None = None, api_key: str | None = None) -> dict[str, Any] | None:
+        if not device_id and not api_key:
+            return None
+        with self.get_db_connection() as conn:
+            if device_id:
+                cursor = conn.execute("SELECT id, name, type, status, api_key, last_seen, created_at, updated_at, metadata FROM devices WHERE id = ?", (device_id,))
+            else:
+                cursor = conn.execute("SELECT id, name, type, status, api_key, last_seen, created_at, updated_at, metadata FROM devices WHERE api_key = ?", (api_key,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            try:
+                meta = json.loads(row[8]) if row[8] else {}
+            except Exception:
+                meta = {}
+            return {"id": row[0], "name": row[1], "type": row[2], "status": row[3], "api_key": row[4], "last_seen": row[5], "created_at": row[6], "updated_at": row[7], "metadata": meta}
+
+    def update_device(self, device_id: int, name: str | None = None, status: str | None = None, metadata: dict | None = None) -> bool:
+        fields = []
+        params: list[Any] = []
+        if name is not None:
+            fields.append("name = ?")
+            params.append(name)
+        if status is not None:
+            fields.append("status = ?")
+            params.append(status)
+        if metadata is not None:
+            fields.append("metadata = ?")
+            params.append(json.dumps(metadata))
+        if not fields:
+            return False
+        fields.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(device_id)
+        sql = f"UPDATE devices SET {', '.join(fields)} WHERE id = ?"
+        with self.get_db_connection() as conn:
+            cursor = conn.execute(sql, tuple(params))
+            return cursor.rowcount > 0
+
+    def regenerate_device_key(self, device_id: int) -> str | None:
+        import secrets
+        new_key = secrets.token_hex(16)
+        with self.get_db_connection() as conn:
+            cursor = conn.execute("UPDATE devices SET api_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (new_key, device_id))
+            if cursor.rowcount > 0:
+                return new_key
+            return None
+
+    def delete_device(self, device_id: int) -> bool:
+        with self.get_db_connection() as conn:
+            cursor = conn.execute("DELETE FROM devices WHERE id = ?", (device_id,))
+            return cursor.rowcount > 0
+
+    def heartbeat_device(self, api_key: str, status: str | None = None, metadata: dict | None = None) -> bool:
+        fields = ["last_seen = CURRENT_TIMESTAMP", "updated_at = CURRENT_TIMESTAMP"]
+        params: list[Any] = []
+        if status is not None:
+            fields.append("status = ?")
+            params.append(status)
+        if metadata is not None:
+            fields.append("metadata = ?")
+            params.append(json.dumps(metadata))
+        params.append(api_key)
+        sql = f"UPDATE devices SET {', '.join(fields)} WHERE api_key = ?"
+        with self.get_db_connection() as conn:
+            cursor = conn.execute(sql, tuple(params))
+            return cursor.rowcount > 0
+
     # === NOWE METODY DLA SERWERA ===
 
     async def initialize(self):
@@ -1758,7 +1884,7 @@ class DatabaseManager:
 
         Args:
             user_id: ID użytkownika
-            provider: Nazwa providera (np. 'openweather', 'newsapi', 'google_search')
+            provider: Nazwa providera (np. 'weatherapi', 'newsapi', 'google_search')
 
         Returns:
             Klucz API lub None jeśli nie istnieje

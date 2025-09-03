@@ -241,8 +241,10 @@ class DailyBriefingModule:
             await weather_module.initialize()
 
             current_location = await self.get_current_location()
-            api_key = self.config.get("api_keys", {}).get("openweather", "")
-            result = await weather_module.get_weather(0, current_location, api_key)
+            # WeatherAPI is now the only supported provider
+            api_key = self.config.get("api_keys", {}).get("weatherapi", "")
+            # Pass user_id as string to align with WeatherModule expectations
+            result = await weather_module.get_weather("0", current_location, api_key)
             if result and "current" in result:
                 text = result["current"]["description"]
                 return {"current_text": text, "location": current_location}

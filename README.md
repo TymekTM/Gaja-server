@@ -311,6 +311,35 @@ Gaja Server implements a **real-time, event-driven architecture** optimized for 
 - **Purpose**: Real-time status updates for overlay
 - **Data**: Server status, activity indicators
 
+## Admin Panel
+
+Nowy, lekki panel administracyjny dostępny pod `/admin` (np. `http://localhost:8001/admin`). Serwowany jako statyczne pliki (Tailwind CDN) – brak procesu build.
+
+Funkcjonalności:
+
+- Dashboard: metryki (CPU, RAM, uptime, aktywne pluginy, aktywność)
+- Users: lista użytkowników + aktywne połączenia WebSocket, możliwość rozłączenia użytkownika
+- Devices: zarządzanie urządzeniami headless / lokalnymi klientami (tworzenie, regeneracja klucza API, heartbeat, usuwanie)
+- Config: podgląd oraz częściowe aktualizacje sekcji `ai`, `tts`, `plugins` poprzez PATCH
+- Logs: szybki podgląd ostatnich wpisów logów
+
+### Device Heartbeat
+
+Urządzenia mogą raportować status przez endpoint:
+
+```bash
+curl -X POST "http://localhost:8001/api/v1/device/heartbeat?api_key=TWÓJ_KLUCZ" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"online","metadata":{"ip":"192.168.1.50"}}'
+```
+
+### Tworzenie urządzenia
+
+1. Zaloguj się jako `admin@gaja.app`
+2. Przejdź do zakładki Devices
+3. Utwórz urządzenie – wyświetlony zostanie klucz API (można zregenerować)
+
+
 
 ## Development
 

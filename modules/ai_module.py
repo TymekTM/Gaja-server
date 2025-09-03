@@ -14,6 +14,7 @@ from collections.abc import Callable
 from functools import lru_cache
 import hashlib
 from typing import Any, Optional
+import time
 
 import httpx  # Async HTTP client replacing requests
 from config.config_loader import MAIN_MODEL, PROVIDER, _config, load_config
@@ -104,6 +105,9 @@ LATENCY_TRACE_ENABLED = os.getenv("GAJA_LATENCY_TRACE", "1") not in ("0", "false
 class AIProviders:
     """Rejestr wszystkich obsługiwanych dostawców + metody pomocnicze."""
 
+    # Class-level provider availability cache shared across instances
+    _provider_status_cache: dict[str, dict[str, float | bool]] = {}
+
     def __init__(self) -> None:
         # Async HTTP client for LM Studio (reduced latency)
         self._httpx_client = httpx.AsyncClient(timeout=30.0)
@@ -147,39 +151,63 @@ class AIProviders:
     # ---------------------------------------------------------------------
     # Check‑i (zwracają bool, nic nie rzucają)
     # ---------------------------------------------------------------------
-    async def _check_ollama_async(self) -> bool:
-        try:
-            response = await self._httpx_client.get("http://localhost:11434", timeout=3.0)
-            return response.status_code == 200
-        except Exception:
-            return False
+    # ----------------------- provider checks with caching ------------------
+    def _cached_status(self, name: str, ok_ttl: float = 300.0, fail_ttl: float = 60.0) -> Optional[bool]:
+        entry = self._provider_status_cache.get(name)
+        if not entry:
+            return None
+        age = time.time() - float(entry.get("ts", 0.0))
+        ttl = ok_ttl if entry.get("ok") else fail_ttl
+        if age < ttl:
+            return bool(entry.get("ok"))
+        return None
+
+    def _store_status(self, name: str, ok: bool) -> bool:
+        self._provider_status_cache[name] = {"ok": ok, "ts": time.time()}
+        return ok
 
     def check_ollama(self) -> bool:
+        cached = self._cached_status("ollama")
+        if cached is not None:
+            return cached
         try:
-            return asyncio.run(self._check_ollama_async())
-        except RuntimeError:
-            return False
+            # Quick inexpensive HTTP check (root); tiny timeout to avoid latency inflation
+            r = httpx.get("http://localhost:11434", timeout=0.5)
+            ok = r.status_code == 200
+        except Exception:
+            ok = False
+        return self._store_status("ollama", ok)
 
     def check_lmstudio(self) -> bool:
-        # Lightweight availability check for LM Studio (OpenAI-compatible local server)
+        cached = self._cached_status("lmstudio")
+        if cached is not None:
+            return cached
         base_url = _config.get("LMSTUDIO_URL_BASE", "http://localhost:1234")
+        ok = False
+        # Lightweight availability check for LM Studio (OpenAI-compatible local server)
         try:
-            r = httpx.get(base_url + "/health", timeout=1.5)
+            r = httpx.get(base_url + "/health", timeout=0.6)
             if r.status_code == 200:
-                return True
+                ok = True
         except Exception:
-            pass
-        # Fallback: attempt root path quick connect (some builds don't expose /health)
-        try:
-            r = httpx.get(base_url, timeout=1.0)
-            return r.status_code < 500
-        except Exception:
-            return False
+            ok = False
+        if not ok:
+            # Fallback: attempt root path quick connect (some builds don't expose /health)
+            try:
+                r = httpx.get(base_url, timeout=0.5)
+                ok = r.status_code < 500
+            except Exception:
+                ok = False
+        return self._store_status("lmstudio", ok)
 
     def check_openai(self) -> bool:
+        # OpenAI key presence rarely changes during runtime; cache short-term
+        cached = self._cached_status("openai", ok_ttl=600.0, fail_ttl=30.0)
+        if cached is not None:
+            return cached
         key_valid = AIProviders._key_ok("OPENAI_API_KEY", "openai")
         logger.info(f"🔧 OpenAI check: key_valid={key_valid}")
-        return key_valid
+        return self._store_status("openai", key_valid)
 
     # remove original dynamic key checks for placeholders
 
@@ -466,18 +494,43 @@ class AIProviders:
                             tracer.event("fast_tool_path_weather")
                         # Build concise natural language summary
                         try:
-                            loc = tool_result.get("data", {}).get("location", {})
-                            curr = tool_result.get("data", {}).get("current", {})
-                            forecast = tool_result.get("data", {}).get("forecast", [])
-                            location_text = loc.get("name") or "(lokalizacja)"
-                            desc = curr.get("description", "")
+                            # Guard: only proceed if success True and data present
+                            if not tool_result.get("success"):
+                                raise ValueError("fast_path_skip: success False")
+                            data_block = tool_result.get("data") or {}
+                            if not isinstance(data_block, dict):
+                                raise ValueError("fast_path_skip: data not dict")
+                            loc = data_block.get("location", {}) or {}
+                            curr = data_block.get("current", {}) or {}
+                            forecast = data_block.get("forecast", []) or []
+
+                            # Minimal required fields (fallbacks to avoid None spam)
+                            location_text = loc.get("name") or loc.get("city") or "(lokalizacja)"
                             temp = curr.get("temperature")
-                            feels = curr.get("feels_like")
-                            summary = f"Pogoda w {location_text}: {desc}, {temp}°C (odczuwalna {feels}°C)."
+                            precip = curr.get("precipitation_chance") or curr.get("rain_chance") or curr.get("precip_chance")
+                            clouds = curr.get("cloud_cover") or curr.get("clouds")
+                            desc = curr.get("description") or ""
+
+                            # Build compact summary focusing on user's likely intent
+                            parts = [f"Pogoda w {location_text}"]
+                            if desc:
+                                parts.append(desc.lower())
+                            if temp is not None:
+                                parts.append(f"{temp}°C")
+                            if precip is not None:
+                                parts.append(f"szansa opadów {precip}%")
+                            if clouds is not None:
+                                parts.append(f"zachmurzenie {clouds}%")
+                            summary = ": ".join([parts[0], ", ".join(parts[1:])]) if len(parts) > 1 else parts[0]
+
+                            # If forecast exists, optionally add tomorrow rain chance/min/max for user's 'jutro' queries
                             if forecast and isinstance(forecast, list):
                                 first = forecast[0]
                                 if isinstance(first, dict):
-                                    summary += f" Dziś min {first.get('min_temp')}°C / max {first.get('max_temp')}°C."
+                                    tmin = first.get('min_temp')
+                                    tmax = first.get('max_temp')
+                                    if tmin is not None and tmax is not None:
+                                        summary += f" | dziś {tmin}/{tmax}°C"
                             fast_payload = {
                                 "message": {"content": summary},
                                 "tool_calls_executed": len(tool_call_details),
