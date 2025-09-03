@@ -242,7 +242,7 @@ async def test_weather_module_mock_but_realistic():
         "get_weather",
         {
             "location": "Warsaw, Poland",
-            "provider": "openweather",
+            "provider": "weatherapi",
             "test_mode": True
         },
         USER_ID
