@@ -328,10 +328,24 @@ class AIProviders:
             response = None
             used_new_key = False
             temperature_removed = False
+            usage_first = None
             for use_new in attempt_order:
                 params, token_key = build_params(use_new)
                 try:
                     response = client.chat.completions.create(**params)
+                    # Capture usage from the first call if provided by API
+                    try:
+                        u = getattr(response, 'usage', None)
+                        if u:
+                            usage_first = {
+                                'prompt_tokens': getattr(u, 'prompt_tokens', None) or getattr(u, 'prompt_tokens_total', None),
+                                'completion_tokens': getattr(u, 'completion_tokens', None),
+                                'total_tokens': getattr(u, 'total_tokens', None) or (
+                                    (getattr(u, 'prompt_tokens', 0) or 0) + (getattr(u, 'completion_tokens', 0) or 0)
+                                ),
+                            }
+                    except Exception:
+                        usage_first = None
                     used_new_key = use_new
                     break
                 except Exception as e:  # noqa: BLE001
@@ -442,12 +456,21 @@ class AIProviders:
                             isinstance(exec_result, dict)
                             and exec_result.get("action_type") == "clarification_request"
                         ):
-                            return {
+                            # Early return but include tool call details and usage if known
+                            payload = {
                                 "message": {"content": exec_result.get("message", "Clarification requested")},
                                 "clarification_request": exec_result.get("clarification_data"),
                                 "tool_calls_executed": 1,
+                                "tool_call_details": [{
+                                    "name": fn_name,
+                                    "arguments": fn_args,
+                                    "result": exec_result,
+                                }],
                                 "requires_user_response": True,
                             }
+                            if usage_first:
+                                payload["usage"] = usage_first
+                            return payload
                     tool_results.append(
                         {
                             "tool_call_id": tool_call.id,
@@ -483,7 +506,8 @@ class AIProviders:
                 )
                 
                 # FAST PATH: Check if we can skip the second OpenAI call
-                fast_tool_mode = os.getenv("GAJA_FAST_TOOL_MODE", "1") not in ("0","false","False")
+                # Fast-path disabled by default; enable with GAJA_FAST_TOOL_MODE=1 explicitly
+                fast_tool_mode = os.getenv("GAJA_FAST_TOOL_MODE", "0") not in ("0","false","False")
                 if fast_tool_mode and len(tool_call_details) == 1:
                     detail = tool_call_details[0]
                     tool_name = detail.get("name", "") if isinstance(detail, dict) else ""
@@ -563,10 +587,59 @@ class AIProviders:
                 if model.startswith("gpt-5-") and final_params.get("temperature") not in (None, 1, 1.0):
                     final_params.pop("temperature", None)
                 final_response = client.chat.completions.create(**final_params)
+                # Extract content with fallback
+                try:
+                    final_content = final_response.choices[0].message.content
+                except Exception:
+                    final_content = None
+                if not final_content:
+                    # Build a graceful fallback using tool errors or a compact summary
+                    try:
+                        # Prefer first tool error message if present
+                        err_msg = None
+                        for d in tool_call_details:
+                            res = d.get('result')
+                            if isinstance(res, dict) and not res.get('success', True):
+                                err_msg = res.get('error') or res.get('message')
+                                break
+                        if err_msg:
+                            final_content = f"Nie mogłem dokończyć odpowiedzi, bo narzędzie zwróciło błąd: {err_msg}. Spróbuj ponownie lub wybierz inny silnik wyszukiwania."
+                        else:
+                            names = [str(d.get('name')) for d in tool_call_details]
+                            final_content = (
+                                "Odpowiedź nie zawierała treści. Wykonane narzędzia: "
+                                + ", ".join([n for n in names if n])
+                            )
+                    except Exception:
+                        final_content = "(Brak treści od modelu po wykonaniu narzędzi)"
+                # Merge usages from first and second call if available
+                usage_combined = None
+                try:
+                    u2 = getattr(final_response, 'usage', None)
+                    if u2:
+                        usage_second = {
+                            'prompt_tokens': getattr(u2, 'prompt_tokens', None) or getattr(u2, 'prompt_tokens_total', None),
+                            'completion_tokens': getattr(u2, 'completion_tokens', None),
+                            'total_tokens': getattr(u2, 'total_tokens', None) or (
+                                (getattr(u2, 'prompt_tokens', 0) or 0) + (getattr(u2, 'completion_tokens', 0) or 0)
+                            ),
+                        }
+                        if usage_first:
+                            usage_combined = {
+                                'prompt_tokens': (usage_first.get('prompt_tokens') or 0) + (usage_second.get('prompt_tokens') or 0),
+                                'completion_tokens': (usage_first.get('completion_tokens') or 0) + (usage_second.get('completion_tokens') or 0),
+                                'total_tokens': (usage_first.get('total_tokens') or 0) + (usage_second.get('total_tokens') or 0),
+                                'by_call': [usage_first, usage_second],
+                            }
+                        else:
+                            usage_combined = usage_second
+                except Exception:
+                    usage_combined = usage_first
                 return {
-                    "message": {"content": final_response.choices[0].message.content},
+                    "message": {"content": final_content},
                     "tool_calls_executed": len(tool_results),
                     "tool_call_details": tool_call_details,
+                    **({"usage": usage_combined} if usage_combined else {}),
                 }
 
             # Normal path: extract content, guard against None/empty
@@ -581,7 +654,11 @@ class AIProviders:
                     "Spróbuj proszę powtórzyć pytanie lub poczekaj chwilę – wykonam ponowną próbę. "
                     "To tymczasowa odpowiedź wygenerowana lokalnie."
                 )
-            return {"message": {"content": base_content}}
+            # Attach usage from first call if present
+            payload = {"message": {"content": base_content}}
+            if usage_first:
+                payload["usage"] = usage_first
+            return payload
         except Exception as exc:  # pragma: no cover - defensive
             logger.error("OpenAI error: %s", exc, exc_info=True)
             return {"message": {"content": f"Błąd OpenAI: {exc}"}}

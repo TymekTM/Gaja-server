@@ -112,8 +112,17 @@ async def execute_function(
             result = await search_module.search(
                 user_id, query, engine, max_results=max_results
             )
+            # Determine success based on result content (no silent 'success' on error)
+            has_error = isinstance(result, dict) and bool(result.get("error"))
+            has_content = False
+            if isinstance(result, dict):
+                if result.get("instant_answer") or result.get("definition"):
+                    has_content = True
+                else:
+                    items = result.get("results") or []
+                    has_content = len(items) > 0
             return {
-                "success": True,
+                "success": (not has_error) and has_content,
                 "data": result,
                 "message": f"Wyszukano informacje dla: {query}",
             }
@@ -238,7 +247,14 @@ class SearchModule:
 
         response = await self.api_module.get(user_id, url, params=params)
 
+        # If DDG doesn't return 200 (e.g., 202), attempt HTML and Wikipedia fallbacks
         if response.get("status") != 200:
+            html_fb = await self._ddg_html_search_fallback(user_id, query, max_results)
+            if html_fb and (html_fb.get("results") or html_fb.get("instant_answer")):
+                return html_fb
+            wikipedia_fb = await self._fallback_wikipedia(user_id, query)
+            if wikipedia_fb:
+                return wikipedia_fb
             return {"error": "Błąd połączenia z DuckDuckGo", "details": response}
 
         data = response.get("data", {})
@@ -296,6 +312,14 @@ class SearchModule:
                     }
                 )
 
+        # If we still have no meaningful data, try HTML and Wikipedia fallbacks
+        if not results["instant_answer"] and not results["definition"] and not results["results"]:
+            html_fb2 = await self._ddg_html_search_fallback(user_id, query, max_results)
+            if html_fb2 and (html_fb2.get("results") or html_fb2.get("instant_answer")):
+                return html_fb2
+            fallback = await self._fallback_wikipedia(user_id, query)
+            if fallback:
+                return fallback
         return results
 
     async def _search_google(
@@ -453,6 +477,124 @@ class SearchModule:
             category=category,
             country=country,
         )
+
+    async def _fallback_wikipedia(self, user_id: int, query: str) -> dict[str, Any] | None:
+        """Try to get a concise summary from Wikipedia if primary engine fails.
+
+        Attempts Polish first, then English. Returns normalized search result structure
+        compatible with other engines.
+        """
+        try:
+            title = await self._wikipedia_opensearch(user_id, "pl", query)
+            lang = "pl"
+            if not title:
+                title = await self._wikipedia_opensearch(user_id, "en", query)
+                lang = "en" if title else None
+            if not title or not lang:
+                return None
+            summary = await self._wikipedia_summary(user_id, lang, title)
+            if not summary:
+                return None
+            return {
+                "engine": "wikipedia",
+                "query": query,
+                "results": [
+                    {
+                        "title": summary.get("title", title),
+                        "snippet": summary.get("extract", ""),
+                        "url": summary.get("url", ""),
+                        "type": "encyclopedia",
+                        "lang": lang,
+                    }
+                ],
+                "instant_answer": {
+                    "text": summary.get("extract", ""),
+                    "source": f"wikipedia_{lang}",
+                    "url": summary.get("url", ""),
+                },
+            }
+        except Exception:
+            return None
+
+    async def _ddg_html_search_fallback(self, user_id: int, query: str, max_results: int = 5) -> dict[str, Any] | None:
+        """Try to parse basic results from DuckDuckGo HTML endpoint when JSON returns 202.
+
+        This is a best-effort lightweight parser (no JS), may return a few top links with titles/snippets.
+        """
+        try:
+            import urllib.parse as _u
+            url = "https://duckduckgo.com/html/"
+            params = {"q": query, "kl": "pl-pl"}
+            resp = await self.api_module.get(user_id, url, params=params)
+            if resp.get("status") != 200:
+                return None
+            html = resp.get("data") or ""
+            if not isinstance(html, str) or not html:
+                return None
+            # Very simple extraction for anchors with class="result__a" and snippet divs
+            import re as _re
+            titles = []
+            for m in _re.finditer(r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, _re.I | _re.S):
+                href = m.group(1)
+                title = _re.sub(r'<[^>]+>', '', m.group(2)).strip()
+                titles.append((title, href))
+                if len(titles) >= max_results:
+                    break
+            # Extract snippets (best-effort)
+            snippets = []
+            for m in _re.finditer(r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>|<div[^>]*class="result__snippet"[^>]*>(.*?)</div>', html, _re.I | _re.S):
+                text = m.group(1) or m.group(2) or ""
+                text = _re.sub(r'<[^>]+>', '', text).strip()
+                if text:
+                    snippets.append(text)
+            results = []
+            for i, (title, href) in enumerate(titles):
+                results.append({
+                    "title": title,
+                    "snippet": snippets[i] if i < len(snippets) else "",
+                    "url": href,
+                    "type": "web_result",
+                })
+            if not results:
+                return None
+            return {"engine": "duckduckgo_html", "query": query, "results": results}
+        except Exception:
+            return None
+
+    async def _wikipedia_opensearch(self, user_id: int, lang: str, query: str) -> str | None:
+        url = f"https://{lang}.wikipedia.org/w/api.php"
+        params = {
+            "action": "opensearch",
+            "search": query,
+            "limit": 1,
+            "namespace": 0,
+            "format": "json",
+        }
+        resp = await self.api_module.get(user_id, url, params=params)
+        if resp.get("status") != 200:
+            return None
+        data = resp.get("data")
+        try:
+            if isinstance(data, list) and len(data) >= 2 and data[1]:
+                return data[1][0]
+        except Exception:
+            pass
+        return None
+
+    async def _wikipedia_summary(self, user_id: int, lang: str, title: str) -> dict[str, Any] | None:
+        import urllib.parse as _u
+        url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{_u.quote(title)}"
+        resp = await self.api_module.get(user_id, url)
+        if resp.get("status") != 200:
+            return None
+        data = resp.get("data") or {}
+        extract = data.get("extract") or data.get("description") or ""
+        page_url = (
+            ((data.get("content_urls") or {}).get("desktop") or {}).get("page")
+            or data.get("canonicalurl")
+            or data.get("pageid")
+        )
+        return {"title": data.get("title", title), "extract": extract, "url": page_url}
 
     async def search_images(
         self, user_id: int, query: str, api_key: str | None = None, engine: str = "bing"

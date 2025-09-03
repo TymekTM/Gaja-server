@@ -13,6 +13,8 @@
         <div class="meta">
           <span id="model"></span>
           <span id="provider"></span>
+          <span id="usage"></span>
+          <span id="latency"></span>
         </div>
       </header>
       <main>
@@ -28,6 +30,7 @@
             <button data-tab="tools" class="tab active">Narzędzia (calls)</button>
             <button data-tab="trace" class="tab">Trace</button>
             <button data-tab="available" class="tab">Dostępne funkcje</button>
+            <button data-tab="payload" class="tab">Payload</button>
           </div>
           <div class="tab-content">
             <div id="tab-tools" class="pane active">
@@ -39,6 +42,16 @@
             <div id="tab-available" class="pane">
               <ul id="available-tools" class="list"></ul>
             </div>
+            <div id="tab-payload" class="pane">
+              <div class="item">
+                <div class="title">System Prompt</div>
+                <pre id="system-prompt" class="code"></pre>
+              </div>
+              <div class="item" style="margin-top:8px;">
+                <div class="title">Messages</div>
+                <pre id="messages-json" class="code"></pre>
+              </div>
+            </div>
           </div>
         </section>
       </main>
@@ -46,4 +59,3 @@
     <script src="/debug/static/app.js"></script>
   </body>
   </html>
-

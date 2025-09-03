@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from auth.security import security_manager
+from datetime import datetime as _dt
+import os as _os
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -133,6 +135,45 @@ class ApiResponse(BaseModel):
     message: str | None = None
 
 
+@router.post("/debug/tools/verify")
+async def debug_verify_tool(payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist verification checkbox state for a function tool.
+
+    Body: { name: string, tested: bool }
+    Stores in user_data/debug_tools_verifications.json with timestamp and version.
+    """
+    try:
+        name = (payload.get("name") or "").strip()
+        tested = bool(payload.get("tested", False))
+        if not name:
+            raise HTTPException(status_code=400, detail="name required")
+        ver_path = _os.path.join("user_data", "debug_tools_verifications.json")
+        _os.makedirs("user_data", exist_ok=True)
+        import json as _json
+        data = {}
+        if _os.path.exists(ver_path):
+            try:
+                data = _json.loads(open(ver_path, encoding='utf-8').read())
+            except Exception:
+                data = {}
+        rec = data.get(name) or {}
+        current_version = _os.getenv("GAJA_VERSION") or "1.0.0"
+        rec.update({
+            "tested": tested,
+            "version": current_version,
+            "ts": _dt.now().isoformat(),
+        })
+        data[name] = rec
+        with open(ver_path, "w", encoding="utf-8") as f:
+            _json.dump(data, f, ensure_ascii=False, indent=2)
+        return {"success": True, "name": name, "tested": tested, "version": current_version, "ts": rec["ts"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Debug verify tool error: {e}")
+        return {"success": False, "error": str(e)}
+
+
 # =============== DEBUG CENTER (Test Bench) ======================
 @router.get("/debug/tools")
 async def debug_list_tools() -> dict[str, Any]:
@@ -142,21 +183,53 @@ async def debug_list_tools() -> dict[str, Any]:
 
         fcs = get_function_calling_system()
         funcs = fcs.convert_modules_to_functions() or []
-        tools = []
+
+        # Load persisted verifications
+        ver_path = _os.path.join("user_data", "debug_tools_verifications.json")
+        ver = {}
+        try:
+            if _os.path.exists(ver_path):
+                import json as _json
+                ver = _json.loads(open(ver_path, encoding='utf-8').read())
+        except Exception:
+            ver = {}
+
+        current_version = _os.getenv("GAJA_VERSION") or "1.0.0"
+
+        tools: list[dict[str, Any]] = []
         for f in funcs:
-            # f is a dict per current implementation: {name, description, parameters, ...}
-            name = f.get("name")
-            desc = f.get("description") or ""
-            plugin = None
-            # heuristic: name may include plugin prefix like plugin_name.function
-            if name and "." in name:
-                plugin = name.split(".", 1)[0]
-            tools.append({
-                "name": name,
-                "description": desc,
-                "plugin": plugin,
-            })
-        return {"tools": tools}
+            try:
+                fn = f.get("function", {})
+                name = (fn.get("name") or "").strip()
+                desc = fn.get("description") or ""
+                params = fn.get("parameters") or {"type": "object", "properties": {}, "required": []}
+                # Resolve plugin/module from function_handlers if available
+                handler = fcs.function_handlers.get(name)
+                plugin = None
+                if isinstance(handler, dict):
+                    plugin = handler.get("plugin_name") or handler.get("module_name")
+                if not plugin and name:
+                    plugin = name.split("_", 1)[0]
+
+                # Verification status
+                v = ver.get(name) or {}
+                tested = bool(v.get("tested", False))
+                last_ver = v.get("version")
+                stale = tested and (last_ver is not None) and (str(last_ver) != str(current_version))
+                tools.append({
+                    "name": name,
+                    "description": desc,
+                    "plugin": plugin,
+                    "parameters": params,
+                    "tested": tested,
+                    "stale": stale,
+                    "lastVerifiedVersion": last_ver,
+                    "lastVerifiedAt": v.get("ts"),
+                })
+            except Exception:
+                continue
+
+        return {"tools": tools, "version": current_version}
     except Exception as e:
         logger.error(f"Debug tools error: {e}")
         return {"tools": [], "error": str(e)}
@@ -175,6 +248,7 @@ async def debug_chat(request: dict[str, Any]) -> dict[str, Any]:
 
         user_id = str(request.get("userId") or "1")
         force_model = request.get("forceModel")
+        client_history = request.get("history") or []  # [{role, content}]
 
         # Prepare minimal context with history from DB if available
         history = []
@@ -185,84 +259,114 @@ async def debug_chat(request: dict[str, Any]) -> dict[str, Any]:
                 logger.debug(f"Debug: history load failed: {e}")
 
         from collections import deque
-        from modules.ai_module import generate_response, MAIN_MODEL, PROVIDER
+        from modules.ai_module import (
+            chat_with_providers,
+            _cached_system_prompt,
+            MAIN_MODEL,
+            PROVIDER,
+        )
+        from core.function_calling_system import get_function_calling_system
         import time as _time
         import json as _json
+        import hashlib as _hash
 
-        # Build conversation history for generate_response
-        conv = deque()
-        for msg in history:
-            role = msg.get("role") or ("assistant" if msg.get("ai_response") else "user")
-            content = msg.get("content") or msg.get("user_query") or msg.get("ai_response") or ""
-            if content:
-                # Coerce assistant content to text only if it's JSON
-                if role == "assistant":
-                    try:
-                        parsed = _json.loads(content)
-                        if isinstance(parsed, dict) and "text" in parsed:
-                            content = parsed["text"]
-                    except Exception:
-                        pass
-                conv.append({"role": role, "content": content})
-        conv.append({"role": "user", "content": query})
-
-        tracking_id = f"debug_{user_id}_{int(_time.time() * 1000)}"
-        resp = await generate_response(
-            conversation_history=conv,
-            tools_info="",
-            detected_language="pl",
-            language_confidence=1.0,
-            use_function_calling=True,
-            user_name="DebugUser",
-            model_override=force_model,
-            tracking_id=tracking_id,
-            enable_latency_trace=True,
-        )
-
-        # Normalize response text
-        text_response = ""
-        tools_used = 0
-        tool_calls = []
-        if isinstance(resp, dict):
-            # fast path or second-pass dict
-            msg = resp.get("message") or {}
-            text_response = (msg.get("content") or "").strip()
-            tools_used = int(resp.get("tool_calls_executed", 0) or 0)
-            tcd = resp.get("tool_call_details") or []
-            # normalize tool call details
-            for item in tcd:
-                name = item.get("name")
-                args = item.get("arguments")
-                res = item.get("result")
-                tool_calls.append({"name": name, "arguments": args, "result": res})
+        # Build conversation history (prefer client session history; fallback to DB)
+        conv_msgs = []
+        if isinstance(client_history, list) and client_history:
+            for m in client_history[-20:]:
+                role = (m.get('role') or 'user').strip()
+                content = (m.get('content') or '').strip()
+                if role in ("user", "assistant") and content:
+                    conv_msgs.append({"role": role, "content": content})
         else:
-            # String JSON {text: ...} or plain text
-            s = str(resp)
+            for msg in history[-10:]:
+                role = msg.get("role") or ("assistant" if msg.get("ai_response") else "user")
+                content = msg.get("content") or msg.get("user_query") or msg.get("ai_response") or ""
+                if content:
+                    if role == "assistant":
+                        try:
+                            parsed = _json.loads(content)
+                            if isinstance(parsed, dict) and "text" in parsed:
+                                content = parsed["text"]
+                        except Exception:
+                            pass
+                    conv_msgs.append({"role": role, "content": content})
+        conv_msgs.append({"role": "user", "content": query})
+
+        # Prepare system prompt (mimic generate_response path)
+        functions = []
+        fcs = get_function_calling_system()
+        functions = fcs.convert_modules_to_functions() or []
+        tools_info = ""
+        funcs_count = len(functions)
+        system_prompt = _cached_system_prompt(
+            None,  # no override
+            "pl",
+            1.0,
+            _hash.sha256((tools_info or "").encode("utf-8")).hexdigest()[:12],
+            None,
+            False,
+            "DebugUser",
+            funcs_count,
+        )
+        messages = list(conv_msgs)
+        messages.insert(0, {"role": "system", "content": system_prompt})
+
+        # Call providers with tracer
+        tracking_id = f"debug_{user_id}_{int(_time.time() * 1000)}"
+        from modules.ai_module import LatencyTracer
+        tracer = LatencyTracer(tracking_id, enabled=True)
+
+        t0 = _time.perf_counter()
+        result = await chat_with_providers(
+            model=force_model or MAIN_MODEL,
+            messages=messages,
+            functions=functions,
+            function_calling_system=fcs,
+            tracer=tracer,
+            stream=False,
+        )
+        elapsed_ms = int((_time.perf_counter() - t0) * 1000)
+        # Persist trace and also return in-memory events
+        try:
+            tracer.flush_to_file()
+        except Exception:
+            pass
+
+        # Normalize output
+        text_response = ""
+        tool_calls = []
+        tools_used = 0
+        usage = result.get("usage") if isinstance(result, dict) else None
+        if isinstance(result, dict):
+            msg = result.get("message") or {}
+            text_response = (msg.get("content") or "").strip()
+            tools_used = int(result.get("tool_calls_executed", 0) or 0)
+            for item in (result.get("tool_call_details") or []):
+                tool_calls.append({
+                    "name": item.get("name"),
+                    "arguments": item.get("arguments"),
+                    "result": item.get("result"),
+                })
+        else:
+            s = str(result or "")
             try:
                 parsed = _json.loads(s)
-                if isinstance(parsed, dict) and "text" in parsed:
-                    text_response = str(parsed.get("text") or "")
-                else:
-                    text_response = s
+                text_response = str(parsed.get("text") or s)
             except Exception:
                 text_response = s
 
-        # Collect trace events for this tracking_id from file (best-effort)
-        trace_events = []
-        try:
-            import os as _os
-            fp = _os.path.join("user_data", "latency_events.jsonl")
-            if _os.path.exists(fp):
-                with open(fp, encoding="utf-8") as f:
-                    for line in f:
-                        try:
-                            ev = _json.loads(line)
-                        except Exception:
-                            continue
-                        if ev.get("tracking_id") == tracking_id:
-                            trace_events.append(ev)
-        except Exception as te:
-            logger.debug(f"Debug trace read failed: {te}")
+        # Use tracer events directly for UI (no file roundtrip)
+        trace_events = getattr(tracer, 'events', []) or []
+
+        # If no textual response and a tool failed, surface the tool error as assistant text
+        if (not text_response) and tool_calls:
+            for tc in tool_calls:
+                res = tc.get('result')
+                if isinstance(res, dict) and not res.get('success', True):
+                    err = res.get('error') or res.get('message') or 'Błąd narzędzia'
+                    text_response = f"Błąd narzędzia: {err}"
+                    break
 
         return {
             "success": True,
@@ -273,6 +377,10 @@ async def debug_chat(request: dict[str, Any]) -> dict[str, Any]:
             "model": force_model or MAIN_MODEL,
             "provider": PROVIDER,
             "fallbackUsed": any(ev.get("event") == "provider_fallback_success" for ev in trace_events),
+            "usage": usage,
+            "elapsedMs": elapsed_ms,
+            "systemPrompt": system_prompt,
+            "messages": messages,
         }
     except HTTPException:
         raise

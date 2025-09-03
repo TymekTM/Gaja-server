@@ -169,8 +169,18 @@ class APIModule:
             api_provider = parsed_url.netloc or "unknown"
             endpoint = parsed_url.path or url
 
+            # Ensure user exists to avoid FOREIGN KEY failures in api_usage
+            try:
+                ensured_user_id = user_id
+                user = self.db_manager.get_user(user_id=user_id)
+                if user is None:
+                    # Create a placeholder user with readable username
+                    ensured_user_id = self.db_manager.create_user(username=f"debug_user_{user_id}")
+            except Exception:
+                ensured_user_id = user_id
+
             self.db_manager.log_api_usage(
-                user_id=user_id,
+                user_id=ensured_user_id,
                 api_provider=api_provider,
                 endpoint=endpoint,
                 method=method.upper(),
@@ -238,8 +248,17 @@ class APIModule:
             data = response["data"]
             if "usage" in data:
                 usage = data["usage"]
+                # Ensure user exists prior to logging usage
+                try:
+                    ensured_user_id = user_id
+                    u = self.db_manager.get_user(user_id=user_id)
+                    if u is None:
+                        ensured_user_id = self.db_manager.create_user(username=f"debug_user_{user_id}")
+                except Exception:
+                    ensured_user_id = user_id
+
                 self.db_manager.log_api_usage(
-                    user_id=user_id,
+                    user_id=ensured_user_id,
                     api_provider="api.openai.com",
                     endpoint="/v1/chat/completions",
                     method="POST",

@@ -106,7 +106,16 @@ def build_full_system_prompt(
     if module_result:
         module_result_segment = build_module_result_prompt(module_result)
 
-    return f"{base_prompt_content}{language_segment}{suggestion_segment}{tools_segment}{active_window_segment}{module_result_segment}"
+    tool_use_policy = (
+        "\n\nZasada użycia narzędzi: Jeśli nie jesteś pewien odpowiedzi lub pytanie "
+        "wymaga aktualnych informacji, AKTYWNIE używaj dostępnych narzędzi (np. 'search', 'weather'). "
+        "Nie zgaduj – w razie błędów narzędzi spróbuj alternatyw, poproś o doprecyzowanie albo wskaż, "
+        "że wynik jest niepewny i wymaga ponowienia zapytania."
+    )
+    return (
+        f"{base_prompt_content}{language_segment}{suggestion_segment}{tools_segment}"
+        f"{active_window_segment}{module_result_segment}{tool_use_policy}"
+    )
 
 
 # --- Utility for module result prompt ---

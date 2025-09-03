@@ -10,6 +10,10 @@
   const availableEl = byId('available-tools');
   const modelEl = byId('model');
   const providerEl = byId('provider');
+  const usageEl = byId('usage');
+  const latencyEl = byId('latency');
+  const sysPromptEl = byId('system-prompt');
+  const msgsEl = byId('messages-json');
 
   // Tabs
   document.querySelectorAll('.tab').forEach((tab) => {
@@ -30,13 +34,44 @@
       (data.tools || []).forEach((t) => {
         const li = document.createElement('li');
         li.className = 'item';
+        const stale = t.stale ? ' <span style="color:#f59e0b">(stale)</span>' : '';
+        const params = t.parameters ? JSON.stringify(t.parameters, null, 2) : '{}';
         li.innerHTML = `
-          <div class="title">${t.name}</div>
+          <div class="title">${t.name}${stale}</div>
           <div class="kv">
             <div>Plugin</div><div class="code">${t.plugin || '-'}</div>
             <div>Description</div><div>${t.description || ''}</div>
+            <div>Parameters</div><div class="code">${params}</div>
+            <div>Tested OK</div>
+            <div>
+              <label style="display:flex;align-items:center;gap:8px;">
+                <input type="checkbox" class="verify" ${t.tested ? 'checked' : ''} data-name="${t.name}">
+                <span>${t.tested ? 'yes' : 'no'}</span>
+              </label>
+              <div style="font-size:11px;opacity:0.7;">last: ${t.lastVerifiedVersion || '-'} @ ${t.lastVerifiedAt || '-'}</div>
+            </div>
           </div>
         `;
+        // Attach checkbox handler
+        const cb = li.querySelector('input.verify');
+        const label = li.querySelector('label span');
+        cb.addEventListener('change', async () => {
+          try {
+            cb.disabled = true;
+            const resp = await fetch('/api/v1/debug/tools/verify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name: t.name, tested: cb.checked })
+            });
+            const j = await resp.json();
+            label.textContent = cb.checked ? 'yes' : 'no';
+          } catch (e) {
+            console.error(e);
+            cb.checked = !cb.checked;
+          } finally {
+            cb.disabled = false;
+          }
+        });
         availableEl.appendChild(li);
       });
     } catch (e) {
@@ -89,17 +124,20 @@
     });
   }
 
+  const sessionHistory = [];
+
   async function sendQuery() {
     const text = input.value.trim();
     if (!text) return;
     input.value = '';
     addMsg('user', text);
+    sessionHistory.push({ role: 'user', content: text });
     sendBtn.disabled = true;
     try {
       const r = await fetch('/api/v1/debug/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: text })
+        body: JSON.stringify({ query: text, history: sessionHistory })
       });
       const data = await r.json();
       if (!r.ok) {
@@ -108,9 +146,27 @@
       }
       if (data.model) modelEl.textContent = `Model: ${data.model}`;
       if (data.provider) providerEl.textContent = `Provider: ${data.provider}${data.fallbackUsed ? ' (fallback)' : ''}`;
-      addMsg('assistant', data.response || '(brak odpowiedzi)');
+      if (data.usage) {
+        const p = data.usage.prompt_tokens ?? '-';
+        const c = data.usage.completion_tokens ?? '-';
+        const t = data.usage.total_tokens ?? '-';
+        usageEl.textContent = `Tokens: p=${p} c=${c} t=${t}`;
+      } else {
+        usageEl.textContent = '';
+      }
+      if (typeof data.elapsedMs === 'number') {
+        latencyEl.textContent = `Latency: ${data.elapsedMs} ms`;
+      } else {
+        latencyEl.textContent = '';
+      }
+      const reply = data.response || '(brak odpowiedzi)';
+      addMsg('assistant', reply);
+      sessionHistory.push({ role: 'assistant', content: reply });
       renderToolCalls(data.toolCalls || []);
       renderTrace(data.traceEvents || []);
+      // Payload
+      if (data.systemPrompt) sysPromptEl.textContent = data.systemPrompt;
+      if (data.messages) msgsEl.textContent = JSON.stringify(data.messages, null, 2);
     } catch (e) {
       console.error(e);
       addMsg('assistant', '(Błąd) ' + String(e));
@@ -126,4 +182,3 @@
   fetchAvailableTools();
   input.focus();
 })();
-
