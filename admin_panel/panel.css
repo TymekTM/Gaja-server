@@ -1,0 +1,23 @@
+/* Minimal custom styling building on Tailwind */
+:root { color-scheme: dark; }
+html,body{margin:0;padding:0}
+.font-inter{font-family:'Inter',sans-serif}
+.card{background:#0f172a99;border:1px solid #334155;border-radius:0.75rem;padding:1rem;backdrop-filter:blur(6px);box-shadow:0 4px 16px -4px #00000080}
+.badge{display:inline-flex;align-items:center;padding:0.125rem 0.5rem;border:1px solid #475569;background:#1e293b;border-radius:0.375rem;font-size:0.75rem;font-weight:500}
+.table-grid{width:100%;font-size:0.875rem;border-collapse:collapse}
+.table-grid thead{color:#94a3b8;font-weight:500}
+.table-grid th{text-align:left;font-weight:500;padding-bottom:0.5rem}
+.table-grid td{padding:0.375rem 0;border-top:1px solid #1e293b;vertical-align:top}
+.status-online{color:#34d399}
+.status-offline{color:#64748b}
+.status-error{color:#f87171}
+.scrollbar-thin::-webkit-scrollbar{width:6px;height:6px}
+.scrollbar-thin::-webkit-scrollbar-track{background:transparent}
+.scrollbar-thin::-webkit-scrollbar-thumb{background:#334155;border-radius:3px}
+/* Responsive helpers */
+@media (max-width: 640px){
+	header nav.show-mobile{display:flex !important;flex-wrap:wrap;margin-top:0.75rem}
+	header nav.show-mobile button{flex:1 1 45%;}
+	.card{padding:0.75rem}
+	.table-grid{font-size:0.75rem}
+}

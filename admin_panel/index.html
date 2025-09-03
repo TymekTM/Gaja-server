@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="pl" class="h-full">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>GAJA Admin Panel</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Use absolute path to mounted static to work when accessing /admin -->
+  <link rel="stylesheet" href="/admin/static/panel.css" />
+</head>
+<body class="h-full bg-slate-950 text-slate-100 font-inter">
+  <div id="app" class="h-full flex flex-col">
+    <header class="border-b border-slate-800 px-4 py-3 flex items-center gap-4 flex-wrap md:flex-nowrap">
+      <div class="flex items-center gap-3 flex-1 min-w-[200px]">
+        <button id="mobileMenuBtn" class="md:hidden inline-flex items-center justify-center h-8 w-8 rounded bg-slate-800 hover:bg-slate-700" aria-label="Menu">
+          <span class="block w-4 h-0.5 bg-slate-200 mb-1"></span>
+          <span class="block w-4 h-0.5 bg-slate-200 mb-1"></span>
+          <span class="block w-4 h-0.5 bg-slate-200"></span>
+        </button>
+        <h1 class="text-xl font-semibold tracking-wide whitespace-nowrap">GAJA Admin Center</h1>
+      </div>
+      <nav class="flex gap-2 text-sm w-full md:w-auto order-3 md:order-none hidden md:flex" id="nav"></nav>
+      <div class="ml-auto flex items-center gap-3 order-2 md:order-none">
+        <span id="statusDot" class="inline-flex h-3 w-3 rounded-full bg-emerald-500 animate-pulse"></span>
+        <span id="uptime" class="text-xs text-slate-400"></span>
+        <button id="logoutBtn" class="text-xs bg-slate-800 hover:bg-slate-700 px-3 py-1 rounded">Wyloguj</button>
+      </div>
+    </header>
+    <main class="flex-1 overflow-auto p-4" id="viewContainer"></main>
+  </div>
+  <div id="loginModal" class="fixed inset-0 bg-slate-950/90 backdrop-blur flex items-center justify-center">
+    <form id="loginForm" class="bg-slate-900 border border-slate-700 rounded-xl p-6 w-full max-w-sm space-y-4 shadow-xl">
+      <h2 class="text-lg font-semibold">Logowanie Admin</h2>
+      <label class="block text-sm">Email
+        <input type="email" name="email" value="admin@gaja.app" required class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+      </label>
+      <label class="block text-sm">Hasło
+        <input type="password" name="password" required class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+      </label>
+      <button class="w-full bg-emerald-600 hover:bg-emerald-500 rounded py-2 font-medium">Zaloguj</button>
+      <p id="loginError" class="text-xs text-red-400"></p>
+    </form>
+  </div>
+  <script src="/admin/static/panel.js"></script>
+</body>
+</html>
