@@ -195,11 +195,10 @@ async def test_search_module_extended():
     
     # Test get_functions
     funcs = mod.get_functions()
-    assert len(funcs) >= 2, "search_module should have at least 2 functions"
+    assert len(funcs) >= 1, "search_module should have at least 1 function"
     
     func_names = {f["name"] for f in funcs}
     assert "search" in func_names, "search function should be available"
-    assert "search_news" in func_names, "search_news function should be available"
     
     # Test search function with test_mode
     result = await mod.execute_function(
@@ -211,14 +210,7 @@ async def test_search_module_extended():
     assert result["test_mode"] is True, "Should confirm test mode"
     assert "data" in result, "Should have data field"
     
-    # Test search_news function with test_mode
-    result = await mod.execute_function(
-        "search_news", 
-        {"query": "technologia", "test_mode": True, "max_results": 2}, 
-        USER_ID
-    )
-    assert result["success"] is True, "Search news should succeed in test mode"
-    assert result["test_mode"] is True, "Should confirm test mode"
+    # search_news removed from search_module; no further checks here
 
 @pytest.mark.integration
 @pytest.mark.asyncio  

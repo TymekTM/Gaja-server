@@ -51,37 +51,6 @@ def get_functions() -> list[dict[str, Any]]:
                 "required": ["query"],
             },
         },
-        {
-            "name": "search_news",
-            "description": "Wyszukuje najnowsze wiadomości",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Temat wiadomości do wyszukania",
-                    },
-                    "language": {
-                        "type": "string",
-                        "description": "Język wiadomości",
-                        "default": "pl",
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "Maksymalna liczba wyników",
-                        "default": 5,
-                        "minimum": 1,
-                        "maximum": 20,
-                    },
-                    "test_mode": {
-                        "type": "boolean",
-                        "description": "Tryb testowy (używa mock danych)",
-                        "default": False,
-                    },
-                },
-                "required": ["query"],
-            },
-        },
     ]
 
 
@@ -127,32 +96,7 @@ async def execute_function(
                 "message": f"Wyszukano informacje dla: {query}",
             }
 
-        elif function_name == "search_news":
-            query = parameters.get("query")
-            language = parameters.get("language", "pl")
-            max_results = parameters.get("max_results", 5)
-            test_mode = parameters.get("test_mode", False)
-
-            # Sprawdź czy jest tryb testowy lub brak klucza API
-            api_key = await search_module._get_user_api_key(user_id, "newsapi")
-            if not api_key or test_mode:
-                # Zwróć mock dane
-                mock_data = search_module._get_mock_news_data(query, max_results)
-                return {
-                    "success": True,
-                    "data": mock_data,
-                    "message": f"Znaleziono najnowsze wiadomości dla: {query} (tryb testowy)",
-                    "test_mode": True,
-                }
-
-            result = await search_module.search_news(
-                user_id, query, language, max_results, api_key
-            )
-            return {
-                "success": True,
-                "data": result,
-                "message": f"Znaleziono najnowsze wiadomości dla: {query}",
-            }
+        
 
         else:
             return {"success": False, "error": f"Unknown function: {function_name}"}
@@ -439,44 +383,7 @@ class SearchModule:
 
         return results
 
-    async def search_news(
-        self,
-        user_id: int,
-        query: str | None = None,
-        language: str = "pl",
-        max_results: int = 5,
-        api_key: str | None = None,
-        category: str | None = None,
-        country: str = "pl",
-    ) -> dict[str, Any]:
-        """Wyszukuje wiadomości.
-
-        Args:
-            user_id: ID użytkownika
-            query: Zapytanie (opcjonalne)
-            category: Kategoria wiadomości
-            country: Kod kraju
-            api_key: Klucz NewsAPI
-
-        Returns:
-            Wyniki wyszukiwania wiadomości
-        """
-        if not api_key:
-            return {
-                "error": "Wyszukiwanie wiadomości wymaga klucza NewsAPI",
-                "help": "Ustaw klucz API z https://newsapi.org",
-            }
-
-        if not self.api_module:
-            await self.initialize()
-
-        return await self.api_module.get_news(
-            user_id=user_id,
-            api_key=api_key,
-            query=query,
-            category=category,
-            country=country,
-        )
+    
 
     async def _fallback_wikipedia(self, user_id: int, query: str) -> dict[str, Any] | None:
         """Try to get a concise summary from Wikipedia if primary engine fails.
@@ -819,73 +726,7 @@ class SearchModule:
             "test_mode": True,
         }
 
-    def _get_mock_news_data(self, query: str, max_results: int) -> dict[str, Any]:
-        """Zwraca przykładowe wyniki wiadomości (mock) dla testów."""
-        from datetime import datetime, timedelta
-
-        # Generuj przykładowe daty
-        now = datetime.now()
-        dates = [
-            (now - timedelta(hours=i)).strftime("%Y-%m-%d %H:%M:%S")
-            for i in range(max_results)
-        ]
-
-        return {
-            "query": query,
-            "articles": [
-                {
-                    "title": f"Ważne wiadomości o {query}",
-                    "description": f"Najnowsze informacje dotyczące {query}. To jest przykładowy opis artykułu prasowego.",
-                    "url": "https://news.example.com/article1",
-                    "published_at": (
-                        dates[0] if dates else now.strftime("%Y-%m-%d %H:%M:%S")
-                    ),
-                    "source": {
-                        "name": "Example News",
-                        "url": "https://news.example.com",
-                    },
-                    "author": "Jan Kowalski",
-                    "category": "general",
-                },
-                {
-                    "title": f"Analiza sytuacji związanej z {query}",
-                    "description": f"Szczegółowa analiza i komentarz ekspertów na temat {query}.",
-                    "url": "https://analysis.example.com/article2",
-                    "published_at": (
-                        dates[1]
-                        if len(dates) > 1
-                        else now.strftime("%Y-%m-%d %H:%M:%S")
-                    ),
-                    "source": {
-                        "name": "Expert Analysis",
-                        "url": "https://analysis.example.com",
-                    },
-                    "author": "Anna Nowak",
-                    "category": "business",
-                },
-                {
-                    "title": f"Wydarzenia związane z {query}",
-                    "description": f"Relacja z ostatnich wydarzeń i ich wpływ na {query}.",
-                    "url": "https://events.example.com/article3",
-                    "published_at": (
-                        dates[2]
-                        if len(dates) > 2
-                        else now.strftime("%Y-%m-%d %H:%M:%S")
-                    ),
-                    "source": {
-                        "name": "Event Reporter",
-                        "url": "https://events.example.com",
-                    },
-                    "author": "Piotr Wiśniewski",
-                    "category": "politics",
-                },
-            ][
-                :max_results
-            ],  # Ogranicz do żądanej liczby wyników
-            "total_results": max_results,
-            "language": "pl",
-            "test_mode": True,
-        }
+    
 
     async def execute_function(self, function_name: str, parameters: dict[str, Any], user_id: int = 1) -> dict[str, Any]:
         """Wykonuje funkcję modułu search."""
@@ -919,40 +760,11 @@ class SearchModule:
                     "message": f"Wyszukano '{query}' w {engine}",
                 }
 
-            elif function_name == "search_news":
-                query = parameters.get("query")
-                if not query:
-                    return {
-                        "success": False,
-                        "error": "Brak wymaganego parametru: query",
-                    }
-                
-                max_results = parameters.get("max_results", 10)
-                language = parameters.get("language", "pl")
-                test_mode = parameters.get("test_mode", False)
-
-                if test_mode:
-                    # Zwróć mock dane
-                    mock_data = self._get_mock_news_data(query, max_results)
-                    return {
-                        "success": True,
-                        "data": mock_data,
-                        "message": f"Wyszukano wiadomości o '{query}' (tryb testowy)",
-                        "test_mode": True,
-                    }
-
-                result = await self.search_news(user_id, query, max_results, language)
-                return {
-                    "success": True,
-                    "data": result,
-                    "message": f"Wyszukano wiadomości o '{query}'",
-                }
-
             else:
                 return {
                     "success": False,
                     "error": f"Nieznana funkcja: {function_name}",
-                    "available_functions": ["search", "search_news"],
+                    "available_functions": ["search"],
                 }
 
         except Exception as e:
