@@ -80,50 +80,9 @@ class FunctionCallingSystem:
 
         start_time = time.perf_counter()
         functions: list[dict[str, Any]] = []
-        # ---- Plugin manager functions ----
-        try:
-            from core.plugin_manager import plugin_manager
+        seen_names: set[str] = set()
 
-            registry = getattr(plugin_manager, "function_registry", {}) or {}
-            for full_func_name, func_info in registry.items():
-                parts = full_func_name.split(".")
-                if len(parts) != 2:
-                    continue
-                plugin_name, func_name = parts
-                if isinstance(func_info, dict):
-                    description = func_info.get(
-                        "description", f"Function {full_func_name}"
-                    )
-                    parameters = func_info.get(
-                        "parameters",
-                        {"type": "object", "properties": {}, "required": []},
-                    )
-                else:
-                    description = f"Function {full_func_name}"
-                    parameters = {
-                        "type": "object",
-                        "properties": {},
-                        "required": [],
-                    }
-                openai_function = {
-                    "type": "function",
-                    "function": {
-                        "name": full_func_name.replace(".", "_"),
-                        "description": description,
-                        "parameters": parameters,
-                    },
-                }
-                functions.append(openai_function)
-                handler_name = full_func_name.replace(".", "_")
-                self.function_handlers[handler_name] = {
-                    "original_name": full_func_name,
-                    "plugin_name": plugin_name,
-                    "function_name": func_name,
-                }
-        except Exception:  # pragma: no cover
-            logger.debug("Plugin manager not available for function conversion")
-
-        # ---- Server modules ----
+        # ---- Server modules (canonical tool set) ----
         import importlib
 
         module_specs = [
@@ -138,6 +97,8 @@ class FunctionCallingSystem:
             ("notes", "notes_module"),
             ("tasks", "tasks_module"),
         ]
+
+        core_import_names = {imp for _, imp in module_specs}
 
         for module_name, import_name in module_specs:
             try:
@@ -154,10 +115,14 @@ class FunctionCallingSystem:
                 continue
             for func in module_functions:
                 try:
+                    handler_name = f"{module_name}_{func['name']}"
+                    if handler_name in seen_names:
+                        # Skip duplicate function name
+                        continue
                     openai_func = {
                         "type": "function",
                         "function": {
-                            "name": f"{module_name}_{func['name']}",
+                            "name": handler_name,
                             "description": func.get("description", "No description"),
                             "parameters": func.get(
                                 "parameters",
@@ -166,7 +131,7 @@ class FunctionCallingSystem:
                         },
                     }
                     functions.append(openai_func)
-                    handler_name = f"{module_name}_{func['name']}"
+                    seen_names.add(handler_name)
                     if module_name not in self._cached_module_instances:
                         # Instantiate module class if present
                         instance = None
@@ -206,6 +171,59 @@ class FunctionCallingSystem:
                     logger.error(
                         f"Error processing function {func} in module {module_name}: {func_err}"
                     )
+
+        # ---- Plugin manager functions (only for non-core/extra plugins) ----
+        try:
+            from core.plugin_manager import plugin_manager
+
+            registry = getattr(plugin_manager, "function_registry", {}) or {}
+            for full_func_name, func_info in registry.items():
+                parts = full_func_name.split(".")
+                if len(parts) != 2:
+                    continue
+                plugin_name, func_name = parts
+
+                # Skip functions provided by canonical server modules to avoid duplicates
+                if plugin_name in core_import_names:
+                    continue
+
+                if isinstance(func_info, dict):
+                    description = func_info.get(
+                        "description", f"Function {full_func_name}"
+                    )
+                    parameters = func_info.get(
+                        "parameters",
+                        {"type": "object", "properties": {}, "required": []},
+                    )
+                else:
+                    description = f"Function {full_func_name}"
+                    parameters = {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                    }
+
+                handler_name = full_func_name.replace(".", "_")
+                if handler_name in seen_names:
+                    continue
+
+                openai_function = {
+                    "type": "function",
+                    "function": {
+                        "name": handler_name,
+                        "description": description,
+                        "parameters": parameters,
+                    },
+                }
+                functions.append(openai_function)
+                seen_names.add(handler_name)
+                self.function_handlers[handler_name] = {
+                    "original_name": full_func_name,
+                    "plugin_name": plugin_name,
+                    "function_name": func_name,
+                }
+        except Exception:  # pragma: no cover
+            logger.debug("Plugin manager not available for function conversion")
 
         elapsed = (time.perf_counter() - start_time) * 1000
         logger.info(
@@ -478,7 +496,44 @@ class FunctionCallingSystem:
                     "provided_parameters": parameters
                 }
             }
-        
+        # Core module: add_event requires title and date
+        if function_name == "core_add_event":
+            title = (parameters.get("title") or "").strip()
+            date = (parameters.get("date") or "").strip()
+            if not title or not date:
+                missing = []
+                if not title:
+                    missing.append("tytuł")
+                if not date:
+                    missing.append("data (YYYY-MM-DD)")
+                return {
+                    "type": "clarification_request",
+                    "action_type": "clarification_request",
+                    "message": f"Brakuje pól: {', '.join(missing)} do dodania wydarzenia.",
+                    "clarification_data": {
+                        "question": "Podaj tytuł oraz datę (YYYY-MM-DD) i ewentualnie godzinę (HH:MM).",
+                        "parameter": "event_details",
+                        "function": function_name,
+                        "provided_parameters": parameters,
+                    },
+                }
+
+        # Core module: set_timer requires positive duration
+        if function_name == "core_set_timer":
+            dur = str(parameters.get("duration") or "").strip()
+            if not dur or dur in ("0", "0s", "0m", "0h"):
+                return {
+                    "type": "clarification_request",
+                    "action_type": "clarification_request",
+                    "message": "Nieprawidłowy czas timera. Podaj dodatni czas (np. 5m, 30s, 1h).",
+                    "clarification_data": {
+                        "question": "Na jak długo ustawić timer? (np. 15m)",
+                        "parameter": "duration",
+                        "function": function_name,
+                        "provided_parameters": parameters,
+                    },
+                }
+
         # Add more function-specific parameter checks here as needed
         # if function_name.startswith("music_") and not parameters.get("song"):
         #     return clarification for missing song parameter...

@@ -16,6 +16,25 @@
           <span id="usage"></span>
           <span id="latency"></span>
         </div>
+        <div class="controls" style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <label style="display:flex; align-items:center; gap:6px;">
+            <span>Provider:</span>
+            <select id="providerSelect" style="padding:4px 6px;"></select>
+          </label>
+          <label style="display:flex; align-items:center; gap:6px;">
+            <span>Model:</span>
+            <input id="modelInput" type="text" placeholder="model id" style="padding:4px 6px; min-width:260px;" />
+          </label>
+          <label style="display:flex; align-items:center; gap:6px;">
+            <input id="noFallback" type="checkbox" />
+            <span>No fallback</span>
+          </label>
+          <label style="display:flex; align-items:center; gap:6px;">
+            <span>LM Studio URL:</span>
+            <input id="lmstudioUrl" type="text" placeholder="http://localhost:1234" style="padding:4px 6px; min-width:220px;" />
+            <button id="saveLmstudioUrl">Zapisz</button>
+          </label>
+        </div>
       </header>
       <main>
         <section class="chat-panel">

@@ -235,6 +235,63 @@ async def debug_list_tools() -> dict[str, Any]:
         return {"tools": [], "error": str(e)}
 
 
+@router.get("/debug/providers")
+async def debug_list_providers() -> dict[str, Any]:
+    """List available AI providers and default models (for Debug Center switcher)."""
+    try:
+        from modules.ai_module import get_ai_providers
+        from config.config_loader import MAIN_MODEL, PROVIDER, _config
+
+        provs = get_ai_providers().providers
+        provider_names = list(provs.keys())
+        defaults = {"openai": MAIN_MODEL}
+        try:
+            pm = (_config.get("ai") or {}).get("provider_models") or {}
+            if isinstance(pm, dict):
+                defaults.update({k: v for k, v in pm.items() if isinstance(v, str)})
+        except Exception:
+            pass
+        base_urls = {"lmstudio": _config.get("LMSTUDIO_URL_BASE")}
+        return {
+            "providers": provider_names,
+            "defaults": defaults,
+            "current": {"provider": PROVIDER, "model": MAIN_MODEL},
+            "baseUrls": base_urls,
+        }
+    except Exception as e:
+        logger.error(f"Debug providers error: {e}")
+        return {"providers": [], "defaults": {}, "baseUrls": {}, "error": str(e)}
+
+
+@router.post("/debug/providers/lmstudio_url")
+async def debug_set_lmstudio_url(payload: dict[str, Any]) -> dict[str, Any]:
+    """Set LM Studio base URL at runtime and persist to config file."""
+    try:
+        base = (payload.get("baseUrl") or "").strip()
+        if not base:
+            raise HTTPException(status_code=400, detail="baseUrl required")
+        # Normalize (no trailing slash)
+        if base.endswith('/'):
+            base = base[:-1]
+        from config.config_loader import save_config, load_config, _config
+        # Update in-memory config
+        _config["LMSTUDIO_URL_BASE"] = base
+        # Persist to file
+        cfg_path = "server_config.json"
+        try:
+            on_disk = load_config(cfg_path)
+        except Exception:
+            on_disk = {}
+        on_disk["LMSTUDIO_URL_BASE"] = base
+        save_config(on_disk, cfg_path)
+        return {"success": True, "baseUrl": base}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Set LMStudio URL error: {e}")
+        return {"success": False, "error": str(e)}
+
+
 @router.post("/debug/chat")
 async def debug_chat(request: dict[str, Any]) -> dict[str, Any]:
     """Debug chat endpoint returning rich trace and tool-call details.
@@ -248,6 +305,8 @@ async def debug_chat(request: dict[str, Any]) -> dict[str, Any]:
 
         user_id = str(request.get("userId") or "1")
         force_model = request.get("forceModel")
+        provider_override = request.get("providerOverride")
+        no_fallback = bool(request.get("noFallback", False))
         client_history = request.get("history") or []  # [{role, content}]
 
         # Prepare minimal context with history from DB if available
@@ -323,8 +382,10 @@ async def debug_chat(request: dict[str, Any]) -> dict[str, Any]:
             messages=messages,
             functions=functions,
             function_calling_system=fcs,
+            provider_override=provider_override,
             tracer=tracer,
             stream=False,
+            no_fallback=no_fallback,
         )
         elapsed_ms = int((_time.perf_counter() - t0) * 1000)
         # Persist trace and also return in-memory events
@@ -375,7 +436,7 @@ async def debug_chat(request: dict[str, Any]) -> dict[str, Any]:
             "toolsUsed": tools_used,
             "traceEvents": trace_events,
             "model": force_model or MAIN_MODEL,
-            "provider": PROVIDER,
+            "provider": provider_override or PROVIDER,
             "fallbackUsed": any(ev.get("event") == "provider_fallback_success" for ev in trace_events),
             "usage": usage,
             "elapsedMs": elapsed_ms,

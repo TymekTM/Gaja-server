@@ -14,6 +14,12 @@
   const latencyEl = byId('latency');
   const sysPromptEl = byId('system-prompt');
   const msgsEl = byId('messages-json');
+  const providerSelect = byId('providerSelect');
+  const modelInput = byId('modelInput');
+  const noFallbackCb = byId('noFallback');
+  const lmstudioUrlInput = byId('lmstudioUrl');
+  const saveLmstudioBtn = byId('saveLmstudioUrl');
+  let providerDefaults = {};
 
   // Tabs
   document.querySelectorAll('.tab').forEach((tab) => {
@@ -79,6 +85,60 @@
     }
   }
 
+  async function fetchProviders() {
+    try {
+      const r = await fetch('/api/v1/debug/providers');
+      let data = null;
+      if (r.ok) {
+        data = await r.json();
+      }
+      let providers = (data && data.providers) || [];
+      providerDefaults = (data && data.defaults) || {};
+      const baseUrls = (data && data.baseUrls) || {};
+      // Hard fallback if backend unavailable or returned empty list
+      if (!Array.isArray(providers) || providers.length === 0) {
+        providers = ['openai', 'openrouter'];
+        providerDefaults = Object.assign({
+          openai: 'gpt-5-nano',
+          openrouter: 'openai/gpt-oss-20b:free',
+        }, providerDefaults || {});
+      }
+      // Populate select
+      providerSelect.innerHTML = '';
+      providers.forEach((p) => {
+        const opt = document.createElement('option');
+        opt.value = p;
+        opt.textContent = p;
+        providerSelect.appendChild(opt);
+      });
+      // Set current selection and model
+      const current = (data && data.current) || {};
+      if (current.provider && providers.includes(current.provider)) {
+        providerSelect.value = current.provider;
+      }
+      const initialModel = providerDefaults[providerSelect.value] || current.model || '';
+      modelInput.value = initialModel;
+      // LM Studio base URL
+      if (lmstudioUrlInput && baseUrls && baseUrls.lmstudio) {
+        lmstudioUrlInput.value = baseUrls.lmstudio || '';
+      }
+      // Reflect in meta labels initially
+      if (current.model) modelEl.textContent = `Model: ${current.model}`;
+      if (current.provider) providerEl.textContent = `Provider: ${current.provider}`;
+    } catch (e) {
+      console.error(e);
+      // Last-resort hard fallback
+      providerSelect.innerHTML = '';
+      ['openai', 'openrouter'].forEach((p) => {
+        const opt = document.createElement('option');
+        opt.value = p; opt.textContent = p; providerSelect.appendChild(opt);
+      });
+      providerDefaults = { openai: 'gpt-5-nano', openrouter: 'openai/gpt-oss-20b:free' };
+      providerSelect.value = 'openai';
+      modelInput.value = providerDefaults['openai'];
+    }
+  }
+
   function addMsg(role, text) {
     const div = document.createElement('div');
     div.className = 'msg ' + role;
@@ -86,6 +146,34 @@
     chatLog.appendChild(div);
     chatLog.scrollTop = chatLog.scrollHeight;
   }
+
+  providerSelect?.addEventListener('change', () => {
+    const p = providerSelect.value;
+    const suggested = providerDefaults[p];
+    if (suggested) modelInput.value = suggested;
+  });
+
+  saveLmstudioBtn?.addEventListener('click', async () => {
+    try {
+      saveLmstudioBtn.disabled = true;
+      const baseUrl = (lmstudioUrlInput?.value || '').trim();
+      if (!baseUrl) return;
+      const r = await fetch('/api/v1/debug/providers/lmstudio_url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseUrl })
+      });
+      const j = await r.json();
+      if (!r.ok || !j.success) {
+        alert('Nie udało się zapisać URL LM Studio: ' + (j.error || r.status));
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Błąd zapisu URL LM Studio');
+    } finally {
+      saveLmstudioBtn.disabled = false;
+    }
+  });
 
   function renderToolCalls(calls) {
     toolCallsEl.innerHTML = '';
@@ -137,7 +225,13 @@
       const r = await fetch('/api/v1/debug/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: text, history: sessionHistory })
+        body: JSON.stringify({
+          query: text,
+          history: sessionHistory,
+          providerOverride: providerSelect?.value || null,
+          forceModel: (modelInput?.value || '').trim() || null,
+          noFallback: !!(noFallbackCb && noFallbackCb.checked),
+        })
       });
       const data = await r.json();
       if (!r.ok) {
@@ -180,5 +274,6 @@
   sendBtn.addEventListener('click', sendQuery);
 
   fetchAvailableTools();
+  fetchProviders();
   input.focus();
 })();

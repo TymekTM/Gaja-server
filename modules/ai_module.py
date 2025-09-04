@@ -114,6 +114,7 @@ class AIProviders:
 
         # Cached clients to avoid reinitialization overhead
         self._openai_client = None
+        self._openrouter_client = None
         # Removed deprecated provider clients (deepseek, anthropic, transformer)
         self._modules: dict[str, Any] = {
             mod: AIProviders._safe_import(mod)
@@ -123,6 +124,7 @@ class AIProviders:
         # Active providers registry (only requested ones)
         self.providers: dict[str, dict[str, Optional[Callable[..., Any]]]] = {
             "openai": {"module": self._modules["openai"], "check": self.check_openai, "chat": self.chat_openai},
+            "openrouter": {"module": self._modules["openai"], "check": self.check_openrouter, "chat": self.chat_openrouter},
             "ollama": {"module": self._modules["ollama"], "check": self.check_ollama, "chat": self.chat_ollama},
             "lmstudio": {"module": None, "check": self.check_lmstudio, "chat": self.chat_lmstudio},
         }
@@ -182,7 +184,7 @@ class AIProviders:
         cached = self._cached_status("lmstudio")
         if cached is not None:
             return cached
-        base_url = _config.get("LMSTUDIO_URL_BASE", "http://localhost:1234")
+        base_url = _config.get("LMSTUDIO_URL_BASE", os.getenv("LMSTUDIO_URL_BASE", "http://localhost:1234"))
         ok = False
         # Lightweight availability check for LM Studio (OpenAI-compatible local server)
         try:
@@ -194,7 +196,14 @@ class AIProviders:
         if not ok:
             # Fallback: attempt root path quick connect (some builds don't expose /health)
             try:
-                r = httpx.get(base_url, timeout=0.5)
+                r = httpx.get(base_url, timeout=0.6)
+                ok = r.status_code < 500
+            except Exception:
+                ok = False
+        if not ok:
+            # Secondary fallback: try listing models
+            try:
+                r = httpx.get(base_url + "/v1/models", timeout=0.8)
                 ok = r.status_code < 500
             except Exception:
                 ok = False
@@ -208,6 +217,14 @@ class AIProviders:
         key_valid = AIProviders._key_ok("OPENAI_API_KEY", "openai")
         logger.info(f"🔧 OpenAI check: key_valid={key_valid}")
         return self._store_status("openai", key_valid)
+
+    def check_openrouter(self) -> bool:
+        cached = self._cached_status("openrouter", ok_ttl=600.0, fail_ttl=30.0)
+        if cached is not None:
+            return cached
+        key_valid = AIProviders._key_ok("OPENROUTER_API_KEY", "openrouter")
+        logger.info(f"🔧 OpenRouter check: key_valid={key_valid}")
+        return self._store_status("openrouter", key_valid)
 
     # remove original dynamic key checks for placeholders
 
@@ -234,16 +251,21 @@ class AIProviders:
             logger.error("Ollama error: %s", exc)
             return {"message": {"content": f"Ollama error: {exc}"}}
 
-    def chat_lmstudio(
+    async def chat_lmstudio(
         self,
         model: str,
         messages: list[dict],
         images: list[str] | None = None,
+        functions: list[dict] | None = None,
+        function_calling_system=None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        stream: bool = False,
+        tracer: LatencyTracer | None = None,
+        partial_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any | None]:
-        """Call LM Studio local server (OpenAI-compatible) if available."""
-        base_url = _config.get("LMSTUDIO_URL_BASE", "http://localhost:1234")
+        """Call LM Studio local server (OpenAI-compatible). Supports tools when available."""
+        base_url = _config.get("LMSTUDIO_URL_BASE", os.getenv("LMSTUDIO_URL_BASE", "http://localhost:1234"))
         url = f"{base_url}/v1/chat/completions"
         try:
             self._append_images(messages, images)
@@ -251,21 +273,88 @@ class AIProviders:
                 "model": model,
                 "messages": messages,
                 "temperature": temperature if temperature is not None else _config.get("temperature", 0.7),
+                "max_tokens": max_tokens if max_tokens is not None else _config.get("max_tokens", 1500),
             }
-            payload["max_tokens"] = max_tokens if max_tokens is not None else _config.get("max_tokens", 1500)
+            if functions:
+                payload["tools"] = functions
+                payload["tool_choice"] = "auto"
+
             r = httpx.post(url, json=payload, timeout=30)
             if r.status_code >= 400:
-                return {"message": {"content": f"LM Studio HTTP {r.status_code}: {r.text[:200]}"}}
+                raise RuntimeError(f"LM Studio HTTP {r.status_code}: {r.text[:200]}")
             data = r.json()
-            content = (
-                data.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "(no content)")
-            )
-            return {"message": {"content": content}}
+            choice = (data.get("choices") or [{}])[0] or {}
+            msg = choice.get("message") or {}
+            content = (msg.get("content") or "").strip()
+            tool_calls = msg.get("tool_calls") or []
+
+            # If model returned tool calls and we have a function system, execute and do a second pass
+            if tool_calls and function_calling_system and isinstance(tool_calls, list):
+                tool_results = []
+                tool_call_details = []
+                from collections import deque as _dq
+                for tc in tool_calls:
+                    try:
+                        fn_name = (((tc or {}).get("function") or {}).get("name") or "").strip()
+                        fn_args_raw = (((tc or {}).get("function") or {}).get("arguments") or "{}")
+                        try:
+                            fn_args = json.loads(fn_args_raw) if isinstance(fn_args_raw, str) else (fn_args_raw or {})
+                        except Exception:
+                            fn_args = {"raw": fn_args_raw}
+                        if tracer:
+                            tracer.event("tool_call_start", {"name": fn_name})
+                        exec_result = await function_calling_system.execute_function(
+                            fn_name,
+                            fn_args,
+                            conversation_history=_dq(messages[-10:]) if messages else None,
+                        )
+                        if tracer:
+                            tracer.event("tool_call_end", {"name": fn_name})
+                        tool_results.append({
+                            "tool_call_id": (tc or {}).get("id"),
+                            "role": "tool",
+                            "name": fn_name,
+                            "content": str(exec_result),
+                        })
+                        tool_call_details.append({
+                            "name": fn_name,
+                            "arguments": fn_args,
+                            "result": exec_result,
+                        })
+                    except Exception as _exc:
+                        tool_call_details.append({"name": "(error)", "arguments": {}, "result": str(_exc)})
+
+                # append assistant message with tool_calls and tool results
+                messages.append({
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": tool_calls,
+                })
+                messages.extend(tool_results)
+
+                # second pass
+                final_payload = {
+                    "model": model,
+                    "messages": messages,
+                    "max_tokens": payload["max_tokens"],
+                }
+                r2 = httpx.post(url, json=final_payload, timeout=30)
+                if r2.status_code >= 400:
+                    raise RuntimeError(f"LM Studio (2nd) HTTP {r2.status_code}: {r2.text[:200]}")
+                data2 = r2.json()
+                msg2 = ((data2.get("choices") or [{}])[0] or {}).get("message") or {}
+                content2 = (msg2.get("content") or content or "").strip()
+                return {
+                    "message": {"content": content2},
+                    "tool_calls_executed": len(tool_results),
+                    "tool_call_details": tool_call_details,
+                }
+
+            return {"message": {"content": content or "(no content)"}}
         except Exception as exc:
             logger.error("LM Studio error: %s", exc)
-            return {"message": {"content": f"LM Studio error: {exc}"}}
+            # Raise to allow fallback to other providers when LM Studio is unreachable
+            raise
 
     async def chat_openai(
         self,
@@ -438,7 +527,7 @@ class AIProviders:
             # 5. Function calling handling
             if response.choices and response.choices[0].message and response.choices[0].message.tool_calls:
                 tool_results = []
-                tool_call_details = []  # Track details for fast-path optimization
+                tool_call_details = []  # Track details with timings
                 for tool_call in response.choices[0].message.tool_calls:
                     fn_name = tool_call.function.name
                     try:
@@ -446,30 +535,99 @@ class AIProviders:
                     except json.JSONDecodeError:
                         fn_args = {}
                     exec_result = None
+                    # Intercept obvious intent/tool mismatch: calendar intent vs timer tool
+                    try:
+                        last_user_text = ""
+                        for m in reversed(messages):
+                            if isinstance(m, dict) and m.get("role") == "user":
+                                last_user_text = str(m.get("content") or "")
+                                break
+                        if (
+                            fn_name == "core_set_timer"
+                            and last_user_text
+                            and any(kw in last_user_text.lower() for kw in [
+                                "kalendarz", "w kalendarz", "spotkan", "spotkanie", "termin", "piątek", "fryzjer"
+                            ])
+                        ):
+                            # Return clarification suggesting calendar event instead of timer
+                            clarify = {
+                                "type": "clarification_request",
+                                "action_type": "clarification_request",
+                                "message": (
+                                    "Wygląda na prośbę o wydarzenie w kalendarzu, a nie timer. "
+                                    "Podaj tytuł oraz dokładną datę (YYYY-MM-DD) i godzinę (HH:MM), "
+                                    "albo potwierdź: dodać wydarzenie 'Fryzjer' na najbliższy piątek o 14:00?"
+                                ),
+                                "clarification_data": {
+                                    "question": "Jaki tytuł, data (YYYY-MM-DD) i godzina (HH:MM) wydarzenia?",
+                                    "parameter": "event_details",
+                                    "function": "core_add_event",
+                                    "provided_parameters": {}
+                                }
+                            }
+                            # Build immediate payload with single tool detail
+                            payload = {
+                                "message": {"content": clarify.get("message", "Clarification requested")},
+                                "clarification_request": clarify.get("clarification_data"),
+                                "tool_calls_executed": 1,
+                                "tool_call_details": [{
+                                    "name": fn_name,
+                                    "arguments": fn_args,
+                                    "result": clarify,
+                                }],
+                                "requires_user_response": True,
+                            }
+                            if usage_first:
+                                payload["usage"] = usage_first
+                            return payload
+                    except Exception:
+                        pass
+
+                    # Measure tool call timing
+                    _t0 = perf_counter()
+                    _t_rel = None
+                    try:
+                        if tracer:
+                            try:
+                                _t_rel = (perf_counter() - float(getattr(tracer, 'start_monotonic', _t0))) * 1000.0
+                            except Exception:
+                                _t_rel = None
+                            tracer.event("tool_call_start", {"name": fn_name, "t_rel_ms": round(_t_rel, 2) if _t_rel is not None else None})
+                    except Exception:
+                        pass
                     if function_calling_system:
                         exec_result = await function_calling_system.execute_function(
                             fn_name,
                             fn_args,
                             conversation_history=deque(messages[-10:]) if messages else None,
                         )
-                        if (
-                            isinstance(exec_result, dict)
-                            and exec_result.get("action_type") == "clarification_request"
-                        ):
-                            # Early return but include tool call details and usage if known
-                            payload = {
-                                "message": {"content": exec_result.get("message", "Clarification requested")},
-                                "clarification_request": exec_result.get("clarification_data"),
-                                "tool_calls_executed": 1,
-                                "tool_call_details": [{
-                                    "name": fn_name,
-                                    "arguments": fn_args,
-                                    "result": exec_result,
-                                }],
-                                "requires_user_response": True,
-                            }
-                            if usage_first:
-                                payload["usage"] = usage_first
+                    _t1 = perf_counter()
+                    _dur_ms = (_t1 - _t0) * 1000.0
+                    try:
+                        if tracer:
+                            tracer.event("tool_call_end", {"name": fn_name, "duration_ms": round(_dur_ms, 2)})
+                    except Exception:
+                        pass
+                    if (
+                        isinstance(exec_result, dict)
+                        and exec_result.get("action_type") == "clarification_request"
+                    ):
+                        # Early return but include tool call details and usage if known
+                        payload = {
+                            "message": {"content": exec_result.get("message", "Clarification requested")},
+                            "clarification_request": exec_result.get("clarification_data"),
+                            "tool_calls_executed": 1,
+                            "tool_call_details": [{
+                                "name": fn_name,
+                                "arguments": fn_args,
+                                "result": exec_result,
+                                "invoked_rel_ms": round(_t_rel, 2) if _t_rel is not None else None,
+                                "duration_ms": round(_dur_ms, 2),
+                            }],
+                            "requires_user_response": True,
+                        }
+                        if usage_first:
+                            payload["usage"] = usage_first
                             return payload
                     tool_results.append(
                         {
@@ -483,7 +641,9 @@ class AIProviders:
                     tool_call_details.append({
                         "name": fn_name,
                         "arguments": fn_args,
-                        "result": exec_result
+                        "result": exec_result,
+                        "invoked_rel_ms": round(_t_rel, 2) if _t_rel is not None else None,
+                        "duration_ms": round(_dur_ms, 2),
                     })
 
                 # Augment conversation
@@ -664,6 +824,115 @@ class AIProviders:
             return {"message": {"content": f"Błąd OpenAI: {exc}"}}
 
     # Removed deprecated chat providers (deepseek, anthropic, transformer)
+
+    async def chat_openrouter(
+        self,
+        model: str,
+        messages: list[dict],
+        images: list[str] | None = None,
+        functions: list[dict] | None = None,
+        function_calling_system=None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        stream: bool = False,
+        tracer: LatencyTracer | None = None,
+        partial_callback: Callable[[str], None] | None = None,
+    ) -> dict[str, Any | None]:
+        try:
+            # Resolve API key
+            api_key = env_manager.get_api_key("openrouter") if env_manager else None
+            if not api_key:
+                api_key = (
+                    os.getenv("OPENROUTER_API_KEY")
+                    or _config.get("api_keys", {}).get("openrouter")
+                )
+            if not api_key:
+                return {"message": {"content": "Błąd: Brak OPENROUTER_API_KEY"}}
+
+            # Lazy init client
+            if self._openrouter_client is None:
+                from openai import OpenAI  # type: ignore
+                self._openrouter_client = OpenAI(
+                    api_key=api_key,
+                    base_url="https://openrouter.ai/api/v1",
+                    default_headers={
+                        "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "https://gaja.local"),
+                        "X-Title": os.getenv("OPENROUTER_TITLE", "Gaja"),
+                    },
+                )
+            client = self._openrouter_client
+
+            # Append images (textual note)
+            self._append_images(messages, images)
+
+            # Build params
+            params: dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+            }
+            if temperature is not None:
+                params["temperature"] = temperature
+            if max_tokens is not None:
+                params["max_tokens"] = max_tokens
+            else:
+                params["max_tokens"] = _config.get("max_tokens", 1500)
+            if functions:
+                params["tools"] = functions
+                params["tool_choice"] = "auto"
+
+            if tracer:
+                tracer.event("provider_request_start", {"provider": "openrouter"})
+            # First attempt – with tools if provided
+            response = None
+            try:
+                response = client.chat.completions.create(**params)
+            except Exception as e:
+                # Handle OpenRouter provider routing error when tools are not supported
+                msg = str(e)
+                lmsg = msg.lower()
+                if (
+                    ("no endpoints found" in lmsg and "tool use" in lmsg)
+                    or ("404" in lmsg and "tool" in lmsg and "openrouter" in lmsg)
+                ) and ("tools" in params or functions):
+                    logger.warning(
+                        "OpenRouter: tools unsupported for model '%s' (404). Retrying without tools...",
+                        model,
+                    )
+                    # Retry without tools/tool_choice
+                    params.pop("tools", None)
+                    params.pop("tool_choice", None)
+                    try:
+                        response = client.chat.completions.create(**params)
+                    except Exception as e2:  # re-raise with original context if second try fails
+                        raise e2
+                else:
+                    # Different error – re-raise to outer handler
+                    raise
+            if tracer:
+                tracer.event("provider_request_end", {"provider": "openrouter"})
+
+            # Extract usage if present
+            usage_block = None
+            try:
+                u = getattr(response, 'usage', None)
+                if u:
+                    usage_block = {
+                        'prompt_tokens': getattr(u, 'prompt_tokens', None) or getattr(u, 'prompt_tokens_total', None),
+                        'completion_tokens': getattr(u, 'completion_tokens', None),
+                        'total_tokens': getattr(u, 'total_tokens', None),
+                    }
+            except Exception:
+                usage_block = None
+
+            # Extract content
+            try:
+                content = (response.choices[0].message.content or "").strip()
+            except Exception:
+                content = ""
+            return {"message": {"content": content}, **({"usage": usage_block} if usage_block else {})}
+        except Exception as exc:  # pragma: no cover
+            logger.error("OpenRouter error: %s", exc, exc_info=True)
+            return {"message": {"content": f"Błąd OpenRouter: {exc}"}}
 
     async def cleanup(self) -> None:
         """Clean up async resources."""
@@ -852,6 +1121,7 @@ async def chat_with_providers(
     tracer: LatencyTracer | None = None,
     stream: bool = False,
     partial_callback: Callable[[str], None] | None = None,
+    no_fallback: bool = False,
 ) -> dict[str, Any | None]:
     providers = get_ai_providers()
     selected = (provider_override or PROVIDER).lower()
@@ -863,12 +1133,20 @@ async def chat_with_providers(
     logger.info(f"🔧 Available providers: {list(providers.providers.keys())}")
     logger.info(f"🔧 Selected provider config exists: {provider_cfg is not None}")
 
+    forced_selected = provider_override is not None
+
     async def _try(provider_name: str) -> dict[str, Any] | None:
         prov = providers.providers[provider_name]
         logger.info(f"🔧 Trying provider: {provider_name}")
         try:
             check_fn = prov.get("check")
-            if callable(check_fn) and check_fn():
+            check_ok = False
+            if forced_selected and provider_name == selected:
+                # Bypass check when user explicitly forced provider
+                check_ok = True
+            else:
+                check_ok = bool(callable(check_fn) and check_fn())
+            if check_ok:
                 logger.info(f"✅ Provider {provider_name} check passed")
                 if tracer:
                     tracer.event("provider_check_pass", {"provider": provider_name})
@@ -876,6 +1154,40 @@ async def chat_with_providers(
                 # Handle different providers with appropriate parameters
                 chat_func = prov.get("chat")
                 if provider_name == "openai":
+                    if tracer:
+                        tracer.event("provider_request_start", {"provider": provider_name})
+                    result = await chat_func(  # type: ignore[misc]
+                        model,
+                        messages,
+                        images,
+                        functions,
+                        function_calling_system,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        stream=stream,
+                        tracer=tracer,
+                        partial_callback=partial_callback,
+                    )
+                    if tracer:
+                        tracer.event("provider_request_end", {"provider": provider_name})
+                elif provider_name == "openrouter":
+                    if tracer:
+                        tracer.event("provider_request_start", {"provider": provider_name})
+                    result = await chat_func(  # type: ignore[misc]
+                        model,
+                        messages,
+                        images,
+                        functions,
+                        function_calling_system,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        stream=stream,
+                        tracer=tracer,
+                        partial_callback=partial_callback,
+                    )
+                    if tracer:
+                        tracer.event("provider_request_end", {"provider": provider_name})
+                elif provider_name == "lmstudio":
                     if tracer:
                         tracer.event("provider_request_start", {"provider": provider_name})
                     result = await chat_func(  # type: ignore[misc]
@@ -925,10 +1237,38 @@ async def chat_with_providers(
             if tracer:
                 tracer.event("provider_primary_success", {"provider": selected})
             return resp
+        if forced_selected and no_fallback:
+            # Return explicit error without trying other providers
+            logger.error("❌ Provider %s failed and fallback disabled.", selected)
+            if tracer:
+                tracer.event("provider_primary_failed_no_fallback", {"provider": selected})
+            error_payload = json.dumps(
+                {
+                    "command": "",
+                    "params": {},
+                    "text": f"Błąd: Dostawca {selected} nieosiągalny, fallback wyłączony",
+                },
+                ensure_ascii=False,
+            )
+            return {"message": {"content": error_payload}}
     else:
         logger.warning(f"❌ Selected provider {selected} not found in providers")
 
     # fallback‑i
+    if forced_selected and no_fallback:
+        logger.warning("No fallback enabled; skipping other providers.")
+        error_payload = json.dumps(
+            {
+                "command": "",
+                "params": {},
+                "text": f"Błąd: Dostawca {selected} nieosiągalny, fallback wyłączony",
+            },
+            ensure_ascii=False,
+        )
+        if tracer:
+            tracer.event("provider_all_failed_no_fallback")
+        return {"message": {"content": error_payload}}
+
     logger.warning(f"⚠️ Preferred provider {selected} failed, trying fallbacks...")
     for name in [n for n in providers.providers if n != selected]:
         if tracer:

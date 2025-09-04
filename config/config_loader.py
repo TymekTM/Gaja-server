@@ -66,10 +66,15 @@ def create_default_config() -> dict[str, Any]:
             "model": "gpt-5-nano",
             "temperature": 0.7,
             "max_tokens": 1000,
+            # Domyślne modele per‑provider (gdy użytkownik przełącza się w Debug Center)
+            "provider_models": {
+                "openrouter": "openai/gpt-oss-20b:free"
+            },
         },
         "api_keys": {
             "openai": "YOUR_OPENAI_API_KEY_HERE",
             "anthropic": "YOUR_ANTHROPIC_API_KEY_HERE",
+            "openrouter": "YOUR_OPENROUTER_API_KEY_HERE",
         },
         "plugins": {
             "auto_load": True,
