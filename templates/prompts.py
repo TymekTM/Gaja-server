@@ -54,6 +54,18 @@ MODULE_RESULT_PROMPT = (
     "Odpowiedź powinna mieć maksymalnie 2 zdania."
 )
 
+# Zasady formułowania odpowiedzi dla modułu pogody (maksymalnie zwięźle)
+WEATHER_STYLE_PROMPT = (
+    "Zasady odpowiedzi pogodowej: odpowiadaj naturalnie w 1–2 krótkich zdaniach, "
+    "bez list i bez zbędnych parametrów. \n"
+    "Teraz/dziś: 'Miasto: krótki opis, X°C.' Jeśli znasz szansę opadów, dodaj drugie zdanie: "
+    "'Mała/umiarkowana/duża szansa na deszcz.' \n"
+    "Jutro/prognoza: 'Jutro w Miasto krótki opis. Temperatura min–max°C.' Jeśli znasz szansę opadów, "
+    "dodaj drugie zdanie jak wyżej. \n"
+    "Pytanie o konkretny parametr (np. wilgotność, wiatr, ciśnienie): jedno zwięzłe zdanie, np. "
+    "'W Miasto wilgotność wynosi 43%.' Nie dodawaj innych danych, o ile nie poproszono."
+)
+
 # Podsumowanie wyników wyszukiwania
 SEARCH_SUMMARY_PROMPT = (
     "Your Job is to summarize provided sources to the user"

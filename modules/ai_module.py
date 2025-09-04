@@ -20,6 +20,7 @@ import httpx  # Async HTTP client replacing requests
 from config.config_loader import MAIN_MODEL, PROVIDER, _config, load_config
 from core.performance_monitor import measure_performance
 from templates.prompt_builder import build_convert_query_prompt, build_full_system_prompt
+from templates.prompts import WEATHER_STYLE_PROMPT
 
 # -----------------------------------------------------------------------------
 # Konfiguracja logów
@@ -269,11 +270,16 @@ class AIProviders:
         url = f"{base_url}/v1/chat/completions"
         try:
             self._append_images(messages, images)
+            # Resolve max output tokens: env -> config.ai.max_tokens -> top-level -> 4000 default
+            try:
+                MAX_OUT = int(os.getenv("GAJA_MAX_OUTPUT_TOKENS") or _config.get("ai", {}).get("max_tokens") or _config.get("max_tokens") or 4000)
+            except Exception:
+                MAX_OUT = 4000
             payload: dict[str, Any] = {
                 "model": model,
                 "messages": messages,
                 "temperature": temperature if temperature is not None else _config.get("temperature", 0.7),
-                "max_tokens": max_tokens if max_tokens is not None else _config.get("max_tokens", 1500),
+                "max_tokens": max_tokens if max_tokens is not None else MAX_OUT,
             }
             if functions:
                 payload["tools"] = functions
@@ -333,9 +339,16 @@ class AIProviders:
                 messages.extend(tool_results)
 
                 # second pass
+                # Inject concise weather style guidance if any weather tool was used
+                final_messages = list(messages)
+                try:
+                    if any((d or {}).get("name", "").startswith("weather_") for d in tool_call_details):
+                        final_messages.append({"role": "system", "content": WEATHER_STYLE_PROMPT})
+                except Exception:
+                    pass
                 final_payload = {
                     "model": model,
-                    "messages": messages,
+                    "messages": final_messages,
                     "max_tokens": payload["max_tokens"],
                 }
                 r2 = httpx.post(url, json=final_payload, timeout=30)
@@ -399,7 +412,7 @@ class AIProviders:
                     # Some newer models (e.g., gpt-5-nano) only support default temperature=1
                     # We'll add temperature initially; may remove on unsupported_value error and retry
                     "temperature": temperature if temperature is not None else _config.get("temperature", 0.7),
-                    token_key: max_tokens if max_tokens is not None else _config.get("max_tokens", 1500),
+                    token_key: max_tokens if max_tokens is not None else (int(os.getenv("GAJA_MAX_OUTPUT_TOKENS") or _config.get("ai", {}).get("max_tokens") or _config.get("max_tokens") or 4000)),
                 }
                 if functions:
                     params["tools"] = functions
@@ -695,26 +708,99 @@ class AIProviders:
                             clouds = curr.get("cloud_cover") or curr.get("clouds")
                             desc = curr.get("description") or ""
 
-                            # Build compact summary focusing on user's likely intent
-                            parts = [f"Pogoda w {location_text}"]
-                            if desc:
-                                parts.append(desc.lower())
-                            if temp is not None:
-                                parts.append(f"{temp}°C")
-                            if precip is not None:
-                                parts.append(f"szansa opadów {precip}%")
-                            if clouds is not None:
-                                parts.append(f"zachmurzenie {clouds}%")
-                            summary = ": ".join([parts[0], ", ".join(parts[1:])]) if len(parts) > 1 else parts[0]
+                            # Infer last user intent for richer but brief phrasing
+                            last_user_text = ""
+                            try:
+                                for _m in reversed(messages):
+                                    if isinstance(_m, dict) and _m.get("role") == "user":
+                                        last_user_text = str(_m.get("content") or "")
+                                        break
+                            except Exception:
+                                last_user_text = ""
+                            lower_q = last_user_text.lower()
 
-                            # If forecast exists, optionally add tomorrow rain chance/min/max for user's 'jutro' queries
-                            if forecast and isinstance(forecast, list):
-                                first = forecast[0]
-                                if isinstance(first, dict):
-                                    tmin = first.get('min_temp')
-                                    tmax = first.get('max_temp')
-                                    if tmin is not None and tmax is not None:
-                                        summary += f" | dziś {tmin}/{tmax}°C"
+                            # Parameter-specific short sentence (e.g., humidity)
+                            if any(k in lower_q for k in ["wilgot", "wilgoć", "humidity"]):
+                                hum = curr.get("humidity")
+                                if hum is None and forecast and isinstance(forecast, list) and isinstance(forecast[0], dict):
+                                    hum = forecast[0].get("humidity")
+                                if hum is not None:
+                                    summary = f"W {location_text} wilgotność wynosi {round(hum)}%."
+                                    fast_payload = {
+                                        "message": {"content": summary},
+                                        "tool_calls_executed": len(tool_call_details),
+                                        "tool_call_details": tool_call_details,
+                                        "fast_tool_path": True,
+                                    }
+                                    if tracer:
+                                        tracer.event("fast_tool_response_ready", {"chars": len(summary)})
+                                    return fast_payload
+
+                            # Tomorrow/forecast style in 1–2 sentences
+                            ask_tomorrow = ("jutro" in lower_q) or tool_name == "weather_get_forecast"
+                            if ask_tomorrow and isinstance(forecast, list) and forecast:
+                                idx = 1 if len(forecast) >= 2 else 0
+                                day = forecast[idx] if isinstance(forecast[idx], dict) else None
+                                dmin = day.get('min_temp') if isinstance(day, dict) else None
+                                dmax = day.get('max_temp') if isinstance(day, dict) else None
+                                ddesc = (day.get('description') if isinstance(day, dict) else None) or desc or ""
+                                first_sentence = f"Jutro w {location_text} {ddesc.lower()}." if ddesc else f"Jutro w {location_text}."
+                                second_sentence = None
+                                if dmin is not None and dmax is not None:
+                                    second_sentence = f"Temperatura {dmin}–{dmax}°C."
+                                elif temp is not None:
+                                    second_sentence = f"Będzie {temp}°C."
+                                # Precipitation hint if available
+                                p = None
+                                if isinstance(day, dict):
+                                    p = day.get('precip_chance') or day.get('daily_chance_of_rain')
+                                p = p if p is not None else curr.get("precipitation_chance")
+                                precip_sentence = None
+                                try:
+                                    if p is not None:
+                                        p = float(p)
+                                        if p >= 60:
+                                            precip_sentence = "Duża szansa na deszcz."
+                                        elif p >= 30:
+                                            precip_sentence = "Umiarkowana szansa na deszcz."
+                                        elif p > 0:
+                                            precip_sentence = "Mała szansa na deszcz."
+                                    elif any(s in (ddesc or "").lower() for s in ["deszcz", "opad"]):
+                                        precip_sentence = "Możliwe przelotne opady."
+                                except Exception:
+                                    precip_sentence = None
+                                parts_out = [first_sentence]
+                                if second_sentence:
+                                    parts_out.append(second_sentence)
+                                if precip_sentence:
+                                    parts_out.append(precip_sentence)
+                                summary = " ".join(parts_out)
+                                fast_payload = {
+                                    "message": {"content": summary},
+                                    "tool_calls_executed": len(tool_call_details),
+                                    "tool_call_details": tool_call_details,
+                                    "fast_tool_path": True,
+                                }
+                                if tracer:
+                                    tracer.event("fast_tool_response_ready", {"chars": len(summary)})
+                                return fast_payload
+
+                            # Default current weather: two compact sentences when possible
+                            base_sentence = f"{location_text}: {desc.lower()}, {temp}°C." if desc or temp is not None else f"{location_text}."
+                            precip_sentence = None
+                            try:
+                                p = curr.get("precipitation_chance")
+                                if p is not None:
+                                    p = float(p)
+                                    if p >= 60:
+                                        precip_sentence = "Duża szansa na deszcz."
+                                    elif p >= 30:
+                                        precip_sentence = "Umiarkowana szansa na deszcz."
+                                    elif p > 0:
+                                        precip_sentence = "Mała szansa na deszcz."
+                            except Exception:
+                                precip_sentence = None
+                            summary = base_sentence if not precip_sentence else f"{base_sentence} {precip_sentence}"
                             fast_payload = {
                                 "message": {"content": summary},
                                 "tool_calls_executed": len(tool_call_details),
@@ -734,11 +820,18 @@ class AIProviders:
 
                 # Second pass with tool outputs
                 token_key = "max_completion_tokens" if used_new_key else "max_tokens"
+                # Inject concise weather style guidance if a weather tool was called
+                _msgs2 = list(messages)
+                try:
+                    if any((d or {}).get("name", "").startswith("weather_") for d in tool_call_details):
+                        _msgs2.append({"role": "system", "content": WEATHER_STYLE_PROMPT})
+                except Exception:
+                    pass
                 final_params = {
                     "model": model,
-                    "messages": messages,
+                    "messages": _msgs2,
                     "temperature": temperature if temperature is not None else _config.get("temperature", 0.7),
-                    token_key: max_tokens if max_tokens is not None else _config.get("max_tokens", 1500),
+                    token_key: max_tokens if max_tokens is not None else (int(os.getenv("GAJA_MAX_OUTPUT_TOKENS") or _config.get("ai", {}).get("max_tokens") or _config.get("max_tokens") or 4000)),
                 }
                 if functions:
                     final_params["tools"] = functions
@@ -875,7 +968,10 @@ class AIProviders:
             if max_tokens is not None:
                 params["max_tokens"] = max_tokens
             else:
-                params["max_tokens"] = _config.get("max_tokens", 1500)
+                try:
+                    params["max_tokens"] = int(os.getenv("GAJA_MAX_OUTPUT_TOKENS") or _config.get("ai", {}).get("max_tokens") or _config.get("max_tokens") or 4000)
+                except Exception:
+                    params["max_tokens"] = 4000
             if functions:
                 params["tools"] = functions
                 params["tool_choice"] = "auto"
