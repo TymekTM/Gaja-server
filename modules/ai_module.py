@@ -1031,91 +1031,98 @@ class AIProviders:
             if tracer:
                 tracer.event("provider_request_end", {"provider": "openrouter"})
 
-            # Extract usage if present
-            usage_block = None
+            # Extract usage if present (first call)
+            usage_first = None
             try:
                 u = getattr(response, 'usage', None)
                 if u:
-                    usage_block = {
+                    usage_first = {
                         'prompt_tokens': getattr(u, 'prompt_tokens', None) or getattr(u, 'prompt_tokens_total', None),
                         'completion_tokens': getattr(u, 'completion_tokens', None),
                         'total_tokens': getattr(u, 'total_tokens', None),
                     }
             except Exception:
-                usage_block = None
+                usage_first = None
 
-            # Extract content
-            try:
-                content = (response.choices[0].message.content or "").strip()
-            except Exception:
-                content = ""
-            return {"message": {"content": content}, **({"usage": usage_block} if usage_block else {})}
-        except Exception as exc:  # pragma: no cover
-            logger.error("OpenRouter error: %s", exc, exc_info=True)
-            return {"message": {"content": f"Błąd OpenRouter: {exc}"}}
-
-    async def chat_openrouter(
-        self,
-        model: str,
-        messages: list[dict],
-        images: list[str] | None = None,
-        functions: list[dict] | None = None,
-        function_calling_system=None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        stream: bool = False,
-        tracer: LatencyTracer | None = None,
-        partial_callback: Callable[[str], None] | None = None,
-    ) -> dict[str, Any | None]:
-        """OpenRouter tool-calling support with proper two-pass flow.
-
-        Note: Tools must be included in both requests (first and second pass).
-        """
-        try:
-            # API key
-            api_key = os.getenv("OPENROUTER_API_KEY") or _config.get("api_keys", {}).get("openrouter")
-            if not api_key:
-                return {"message": {"content": "Błąd: Brak OPENROUTER_API_KEY"}}
-
-            from openai import OpenAI  # type: ignore
-            if self._openrouter_client is None:
-                self._openrouter_client = OpenAI(
-                    api_key=api_key,
-                    base_url="https://openrouter.ai/api/v1",
-                )
-            client = self._openrouter_client
-
-            # Build params
-            params: dict[str, Any] = {
-                "model": model,
-                "messages": messages,
-            }
-            if temperature is not None:
-                params["temperature"] = temperature
-            if max_tokens is not None:
-                params["max_tokens"] = max_tokens
-            if functions:
-                params["tools"] = functions
-                params["tool_choice"] = "auto"
-
-            if tracer:
-                tracer.event("provider_request_start", {"provider": "openrouter"})
-            response = client.chat.completions.create(**params)
-            if tracer:
-                tracer.event("provider_request_end", {"provider": "openrouter"})
-
-            # Check for tool calls
-            tool_calls = []
-            try:
-                if response.choices and response.choices[0].message:
-                    tool_calls = response.choices[0].message.tool_calls or []
-            except Exception:
-                tool_calls = []
-
-            if tool_calls and function_calling_system:
+            # Handle tool calls (if present)
+            if response.choices and response.choices[0].message and response.choices[0].message.tool_calls:
                 tool_results = []
-                tool_call_details = []
-                # Append assistant message with tool_calls
+                tool_call_details = []  # Track details with timings
+                for tool_call in response.choices[0].message.tool_calls:
+                    fn_name = tool_call.function.name
+                    try:
+                        fn_args = json.loads(tool_call.function.arguments)
+                    except json.JSONDecodeError:
+                        fn_args = {}
+                    exec_result = None
+
+                    # Measure tool call timing
+                    _t0 = perf_counter()
+                    _t_rel = None
+                    try:
+                        if tracer:
+                            try:
+                                _t_rel = (perf_counter() - float(getattr(tracer, 'start_monotonic', _t0))) * 1000.0
+                            except Exception:
+                                _t_rel = None
+                            tracer.event("tool_call_start", {"name": fn_name, "t_rel_ms": round(_t_rel, 2) if _t_rel is not None else None})
+                    except Exception:
+                        pass
+                    
+                    if function_calling_system:
+                        exec_result = await function_calling_system.execute_function(
+                            fn_name,
+                            fn_args,
+                            conversation_history=deque(messages[-10:]) if messages else None,
+                        )
+                    _t1 = perf_counter()
+                    _dur_ms = (_t1 - _t0) * 1000.0
+                    try:
+                        if tracer:
+                            tracer.event("tool_call_end", {"name": fn_name, "duration_ms": round(_dur_ms, 2)})
+                    except Exception:
+                        pass
+
+                    if (
+                        isinstance(exec_result, dict)
+                        and exec_result.get("action_type") == "clarification_request"
+                    ):
+                        # Early return with clarification request
+                        payload = {
+                            "message": {"content": exec_result.get("message", "Clarification requested")},
+                            "clarification_request": exec_result.get("clarification_data"),
+                            "tool_calls_executed": 1,
+                            "tool_call_details": [{
+                                "name": fn_name,
+                                "arguments": fn_args,
+                                "result": exec_result,
+                                "invoked_rel_ms": round(_t_rel, 2) if _t_rel is not None else None,
+                                "duration_ms": round(_dur_ms, 2),
+                            }],
+                            "requires_user_response": True,
+                        }
+                        if usage_first:
+                            payload["usage"] = usage_first
+                        return payload
+                    
+                    tool_results.append(
+                        {
+                            "tool_call_id": tool_call.id,
+                            "role": "tool",
+                            "name": fn_name,
+                            "content": str(exec_result),
+                        }
+                    )
+                    # Store tool call details
+                    tool_call_details.append({
+                        "name": fn_name,
+                        "arguments": fn_args,
+                        "result": exec_result,
+                        "invoked_rel_ms": round(_t_rel, 2) if _t_rel is not None else None,
+                        "duration_ms": round(_dur_ms, 2),
+                    })
+
+                # Augment conversation with tool calls and results
                 messages.append(
                     {
                         "role": "assistant",
@@ -1129,72 +1136,84 @@ class AIProviders:
                                     "arguments": tc.function.arguments,
                                 },
                             }
-                            for tc in tool_calls
+                            for tc in response.choices[0].message.tool_calls
                         ],
                     }
                 )
-                # Execute sequentially (could be parallelized)
-                for tc in tool_calls:
-                    fn_name = tc.function.name
-                    try:
-                        fn_args = json.loads(tc.function.arguments)
-                    except Exception:
-                        fn_args = {}
-                    if tracer:
-                        tracer.event("tool_call_start", {"name": fn_name})
-                    exec_result = await function_calling_system.execute_function(
-                        fn_name, fn_args, conversation_history=deque(messages[-10:]) if messages else None
-                    )
-                    if tracer:
-                        tracer.event("tool_call_end", {"name": fn_name})
-                    tool_results.append(
-                        {
-                            "tool_call_id": tc.id,
-                            "role": "tool",
-                            "name": fn_name,
-                            "content": json.dumps(exec_result, ensure_ascii=False) if not isinstance(exec_result, str) else exec_result,
-                        }
-                    )
-                    tool_call_details.append({
-                        "name": fn_name,
-                        "arguments": fn_args,
-                        "result": exec_result,
-                    })
                 messages.extend(tool_results)
-                # Second pass (must include tools again per OpenRouter docs)
-                params2: dict[str, Any] = {
-                    "model": model,
-                    "messages": messages,
-                }
-                if functions:
-                    params2["tools"] = functions
-                    params2["tool_choice"] = "auto"
-                if tracer:
-                    tracer.event("provider_request_start", {"provider": "openrouter", "second_pass": True})
-                response2 = client.chat.completions.create(**params2)
-                if tracer:
-                    tracer.event("provider_request_end", {"provider": "openrouter", "second_pass": True})
-                content2 = ""
-                try:
-                    content2 = (response2.choices[0].message.content or "").strip()
-                except Exception:
-                    content2 = ""
-                return {
-                    "message": {"content": content2},
-                    "tool_calls_executed": len(tool_results),
-                    "tool_call_details": tool_call_details,
-                }
 
-            # No tool calls -> return content
+                # Make second API call to get final response
+                try:
+                    params_second = params.copy()
+                    params_second["messages"] = messages
+                    # Remove tools for second call to get natural language response
+                    params_second.pop("tools", None)
+                    params_second.pop("tool_choice", None)
+                    
+                    response_second = client.chat.completions.create(**params_second)
+                    
+                    # Extract usage from second call
+                    usage_second = None
+                    try:
+                        u2 = getattr(response_second, 'usage', None)
+                        if u2:
+                            usage_second = {
+                                'prompt_tokens': getattr(u2, 'prompt_tokens', None) or getattr(u2, 'prompt_tokens_total', None),
+                                'completion_tokens': getattr(u2, 'completion_tokens', None),
+                                'total_tokens': getattr(u2, 'total_tokens', None),
+                            }
+                    except Exception:
+                        usage_second = None
+
+                    # Combine usage
+                    usage_combined = None
+                    try:
+                        if usage_first and usage_second:
+                            usage_combined = {
+                                'prompt_tokens': (usage_first.get('prompt_tokens', 0) or 0) + (usage_second.get('prompt_tokens', 0) or 0),
+                                'completion_tokens': (usage_first.get('completion_tokens', 0) or 0) + (usage_second.get('completion_tokens', 0) or 0),
+                                'total_tokens': (usage_first.get('total_tokens', 0) or 0) + (usage_second.get('total_tokens', 0) or 0),
+                            }
+                        else:
+                            usage_combined = usage_second or usage_first
+                    except Exception:
+                        usage_combined = usage_first
+
+                    # Extract final content
+                    try:
+                        final_content = (response_second.choices[0].message.content or "").strip()
+                    except Exception:
+                        final_content = ""
+
+                    return {
+                        "message": {"content": final_content},
+                        "tool_calls_executed": len(tool_results),
+                        "tool_call_details": tool_call_details,
+                        **({"usage": usage_combined} if usage_combined else {}),
+                    }
+                
+                except Exception as second_call_exc:
+                    logger.error("OpenRouter second call error: %s", second_call_exc, exc_info=True)
+                    # Fallback: return tool execution results as message
+                    fallback_content = f"Wykonano {len(tool_results)} narzędzi, ale wystąpił błąd podczas generowania odpowiedzi."
+                    return {
+                        "message": {"content": fallback_content},
+                        "tool_calls_executed": len(tool_results),
+                        "tool_call_details": tool_call_details,
+                        **({"usage": usage_first} if usage_first else {}),
+                    }
+
+            # No tool calls - extract regular content
             try:
                 content = (response.choices[0].message.content or "").strip()
             except Exception:
                 content = ""
-            return {"message": {"content": content}}
-
-        except Exception as exc:
-            logger.error("OpenRouter (tools) error: %s", exc, exc_info=True)
+            return {"message": {"content": content}, **({"usage": usage_first} if usage_first else {})}
+        except Exception as exc:  # pragma: no cover
+            logger.error("OpenRouter error: %s", exc, exc_info=True)
             return {"message": {"content": f"Błąd OpenRouter: {exc}"}}
+
+
 
     async def cleanup(self) -> None:
         """Clean up async resources."""
