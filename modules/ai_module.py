@@ -111,11 +111,13 @@ class AIProviders:
 
     def __init__(self) -> None:
         # Async HTTP client for LM Studio (reduced latency)
+        # Single shared AsyncClient (keep-alive, connection pooling)
         self._httpx_client = httpx.AsyncClient(timeout=30.0)
 
         # Cached clients to avoid reinitialization overhead
         self._openai_client = None
         self._openrouter_client = None
+        self._lmstudio_base_url = None  # resolved base URL (supports Docker/host)
         # Removed deprecated provider clients (deepseek, anthropic, transformer)
         self._modules: dict[str, Any] = {
             mod: AIProviders._safe_import(mod)
@@ -181,33 +183,44 @@ class AIProviders:
             ok = False
         return self._store_status("ollama", ok)
 
+    def _resolve_lmstudio_candidates(self) -> list[str]:
+        # Priority: explicit env/config -> Docker host -> compose svc -> localhost
+        base = _config.get("LMSTUDIO_URL_BASE", os.getenv("LMSTUDIO_URL_BASE"))
+        candidates = []
+        if base:
+            candidates.append(base.rstrip("/"))
+        # Docker host (Linux requires manual setup; try anyway)
+        candidates.append("http://host.docker.internal:1234")
+        # Docker Compose service name
+        candidates.append("http://lmstudio:1234")
+        # Localhost fallback
+        candidates.append("http://localhost:1234")
+        # De-dup while preserving order
+        seen = set()
+        ordered = []
+        for c in candidates:
+            if c not in seen:
+                seen.add(c)
+                ordered.append(c)
+        return ordered
+
     def check_lmstudio(self) -> bool:
         cached = self._cached_status("lmstudio")
         if cached is not None:
             return cached
-        base_url = _config.get("LMSTUDIO_URL_BASE", os.getenv("LMSTUDIO_URL_BASE", "http://localhost:1234"))
         ok = False
-        # Lightweight availability check for LM Studio (OpenAI-compatible local server)
-        try:
-            r = httpx.get(base_url + "/health", timeout=0.6)
-            if r.status_code == 200:
-                ok = True
-        except Exception:
-            ok = False
-        if not ok:
-            # Fallback: attempt root path quick connect (some builds don't expose /health)
+        chosen = None
+        for cand in self._resolve_lmstudio_candidates():
             try:
-                r = httpx.get(base_url, timeout=0.6)
-                ok = r.status_code < 500
+                r = httpx.get(cand + "/v1/models", timeout=0.6)
+                if r.status_code < 500:
+                    ok = True
+                    chosen = cand
+                    break
             except Exception:
-                ok = False
-        if not ok:
-            # Secondary fallback: try listing models
-            try:
-                r = httpx.get(base_url + "/v1/models", timeout=0.8)
-                ok = r.status_code < 500
-            except Exception:
-                ok = False
+                continue
+        if chosen:
+            self._lmstudio_base_url = chosen
         return self._store_status("lmstudio", ok)
 
     def check_openai(self) -> bool:
@@ -266,8 +279,17 @@ class AIProviders:
         partial_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any | None]:
         """Call LM Studio local server (OpenAI-compatible). Supports tools when available."""
-        base_url = _config.get("LMSTUDIO_URL_BASE", os.getenv("LMSTUDIO_URL_BASE", "http://localhost:1234"))
-        url = f"{base_url}/v1/chat/completions"
+        # Resolve base URL with Docker-aware fallbacks
+        if not self._lmstudio_base_url:
+            # trigger availability check to populate base url
+            try:
+                self.check_lmstudio()
+            except Exception:
+                pass
+        base_url = self._lmstudio_base_url or _config.get(
+            "LMSTUDIO_URL_BASE", os.getenv("LMSTUDIO_URL_BASE", "http://localhost:1234")
+        )
+        url = f"{base_url.rstrip('/')}/v1/chat/completions"
         try:
             self._append_images(messages, images)
             # Resolve max output tokens: env -> config.ai.max_tokens -> top-level -> 4000 default
@@ -284,8 +306,8 @@ class AIProviders:
             if functions:
                 payload["tools"] = functions
                 payload["tool_choice"] = "auto"
-
-            r = httpx.post(url, json=payload, timeout=30)
+            # True async call with connection reuse
+            r = await self._httpx_client.post(url, json=payload)
             if r.status_code >= 400:
                 raise RuntimeError(f"LM Studio HTTP {r.status_code}: {r.text[:200]}")
             data = r.json()
@@ -350,8 +372,10 @@ class AIProviders:
                     "model": model,
                     "messages": final_messages,
                     "max_tokens": payload["max_tokens"],
+                    # Include tools again as per OpenAI-compatible semantics
+                    **({"tools": functions, "tool_choice": "auto"} if functions else {}),
                 }
-                r2 = httpx.post(url, json=final_payload, timeout=30)
+                r2 = await self._httpx_client.post(url, json=final_payload)
                 if r2.status_code >= 400:
                     raise RuntimeError(f"LM Studio (2nd) HTTP {r2.status_code}: {r2.text[:200]}")
                 data2 = r2.json()
@@ -1030,6 +1054,148 @@ class AIProviders:
             logger.error("OpenRouter error: %s", exc, exc_info=True)
             return {"message": {"content": f"Błąd OpenRouter: {exc}"}}
 
+    async def chat_openrouter(
+        self,
+        model: str,
+        messages: list[dict],
+        images: list[str] | None = None,
+        functions: list[dict] | None = None,
+        function_calling_system=None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        stream: bool = False,
+        tracer: LatencyTracer | None = None,
+        partial_callback: Callable[[str], None] | None = None,
+    ) -> dict[str, Any | None]:
+        """OpenRouter tool-calling support with proper two-pass flow.
+
+        Note: Tools must be included in both requests (first and second pass).
+        """
+        try:
+            # API key
+            api_key = os.getenv("OPENROUTER_API_KEY") or _config.get("api_keys", {}).get("openrouter")
+            if not api_key:
+                return {"message": {"content": "Błąd: Brak OPENROUTER_API_KEY"}}
+
+            from openai import OpenAI  # type: ignore
+            if self._openrouter_client is None:
+                self._openrouter_client = OpenAI(
+                    api_key=api_key,
+                    base_url="https://openrouter.ai/api/v1",
+                )
+            client = self._openrouter_client
+
+            # Build params
+            params: dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+            }
+            if temperature is not None:
+                params["temperature"] = temperature
+            if max_tokens is not None:
+                params["max_tokens"] = max_tokens
+            if functions:
+                params["tools"] = functions
+                params["tool_choice"] = "auto"
+
+            if tracer:
+                tracer.event("provider_request_start", {"provider": "openrouter"})
+            response = client.chat.completions.create(**params)
+            if tracer:
+                tracer.event("provider_request_end", {"provider": "openrouter"})
+
+            # Check for tool calls
+            tool_calls = []
+            try:
+                if response.choices and response.choices[0].message:
+                    tool_calls = response.choices[0].message.tool_calls or []
+            except Exception:
+                tool_calls = []
+
+            if tool_calls and function_calling_system:
+                tool_results = []
+                tool_call_details = []
+                # Append assistant message with tool_calls
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": response.choices[0].message.content,
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments,
+                                },
+                            }
+                            for tc in tool_calls
+                        ],
+                    }
+                )
+                # Execute sequentially (could be parallelized)
+                for tc in tool_calls:
+                    fn_name = tc.function.name
+                    try:
+                        fn_args = json.loads(tc.function.arguments)
+                    except Exception:
+                        fn_args = {}
+                    if tracer:
+                        tracer.event("tool_call_start", {"name": fn_name})
+                    exec_result = await function_calling_system.execute_function(
+                        fn_name, fn_args, conversation_history=deque(messages[-10:]) if messages else None
+                    )
+                    if tracer:
+                        tracer.event("tool_call_end", {"name": fn_name})
+                    tool_results.append(
+                        {
+                            "tool_call_id": tc.id,
+                            "role": "tool",
+                            "name": fn_name,
+                            "content": json.dumps(exec_result, ensure_ascii=False) if not isinstance(exec_result, str) else exec_result,
+                        }
+                    )
+                    tool_call_details.append({
+                        "name": fn_name,
+                        "arguments": fn_args,
+                        "result": exec_result,
+                    })
+                messages.extend(tool_results)
+                # Second pass (must include tools again per OpenRouter docs)
+                params2: dict[str, Any] = {
+                    "model": model,
+                    "messages": messages,
+                }
+                if functions:
+                    params2["tools"] = functions
+                    params2["tool_choice"] = "auto"
+                if tracer:
+                    tracer.event("provider_request_start", {"provider": "openrouter", "second_pass": True})
+                response2 = client.chat.completions.create(**params2)
+                if tracer:
+                    tracer.event("provider_request_end", {"provider": "openrouter", "second_pass": True})
+                content2 = ""
+                try:
+                    content2 = (response2.choices[0].message.content or "").strip()
+                except Exception:
+                    content2 = ""
+                return {
+                    "message": {"content": content2},
+                    "tool_calls_executed": len(tool_results),
+                    "tool_call_details": tool_call_details,
+                }
+
+            # No tool calls -> return content
+            try:
+                content = (response.choices[0].message.content or "").strip()
+            except Exception:
+                content = ""
+            return {"message": {"content": content}}
+
+        except Exception as exc:
+            logger.error("OpenRouter (tools) error: %s", exc, exc_info=True)
+            return {"message": {"content": f"Błąd OpenRouter: {exc}"}}
+
     async def cleanup(self) -> None:
         """Clean up async resources."""
         await self._httpx_client.aclose()
@@ -1507,12 +1673,17 @@ async def generate_response(
         # 2. Function calling preparation
         function_calling_system = None
         functions = None
-        if use_function_calling and PROVIDER.lower() == "openai":
+        # Prepare functions for providers that support OpenAI-style tools (OpenAI, OpenRouter, LM Studio-compatible)
+        if use_function_calling:
             from core.function_calling_system import get_function_calling_system
             function_calling_system = get_function_calling_system()
             if tracer:
                 tracer.event("function_system_singleton", {"cached": True})
-            functions = function_calling_system.convert_modules_to_functions()
+            try:
+                functions = function_calling_system.convert_modules_to_functions()
+            except Exception as _fc_exc:
+                logger.warning(f"Function conversion failed: {_fc_exc}")
+                functions = None
             if not functions:
                 function_calling_system = None
         tracer.event("functions_prepared", {"count": len(functions) if functions else 0})
