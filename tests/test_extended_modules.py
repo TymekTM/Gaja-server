@@ -210,7 +210,7 @@ async def test_search_module_extended():
     assert result["test_mode"] is True, "Should confirm test mode"
     assert "data" in result, "Should have data field"
     
-    # search_news removed from search_module; no further checks here
+    
 
 @pytest.mark.integration
 @pytest.mark.asyncio  

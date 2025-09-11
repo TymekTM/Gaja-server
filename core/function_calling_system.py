@@ -41,6 +41,8 @@ class FunctionCallingSystem:
         self.function_handlers = {}
         # Cache for instantiated module singletons
         self._cached_module_instances = {}
+        # Flag to track if module instances were initialized
+        self._instances_initialized = False
         # Cache of converted functions (list of function defs) to avoid repeated imports
         self._functions_cache = None
 
@@ -48,7 +50,21 @@ class FunctionCallingSystem:
         """Asynchroniczna inicjalizacja systemu funkcji."""
         # Tutaj można załadować podstawowe moduły
         logger.info("Function calling system initialized")
+        # Clear cache to force refresh of module instances
+        self._functions_cache = None
+        self._instances_initialized = False
         pass
+
+    async def initialize_module_instances(self):
+        """Initialize all cached module instances that have an initialize method."""
+        for module_name, instance in self._cached_module_instances.items():
+            if hasattr(instance, 'initialize'):
+                try:
+                    await instance.initialize()
+                    logger.debug(f"Initialized {module_name} module instance")
+                except Exception as init_err:
+                    logger.error(f"Failed to initialize {module_name} instance: {init_err}")
+        logger.info("All module instances initialized")
 
     def register_module(self, module_name: str, module_data: dict[str, Any]) -> None:
         """Register a module with the function calling system.
@@ -565,6 +581,17 @@ class FunctionCallingSystem:
                 logger.info(
                     f"Executing server module function: {module_name}.{func_name}"
                 )
+                
+                logger.debug(f"Module instance type: {type(module)}")
+                logger.debug(f"Has execute_function: {hasattr(module, 'execute_function')}")
+
+                # Initialize module instances if not already done
+                if not self._instances_initialized:
+                    logger.info("Initializing module instances for the first time")
+                    await self.initialize_module_instances()
+                    self._instances_initialized = True
+                else:
+                    logger.debug("Module instances already initialized")
 
                 if hasattr(module, "execute_function"):
                     # Use the module's execute_function method (async)
@@ -579,7 +606,58 @@ class FunctionCallingSystem:
                     logger.info(f"Server module function result: {result}")
                     return result
                 else:
-                    return f"Module {module_name} does not support execute_function"
+                    # Fallback: call module-level execute_function from modules.<module_name>_module
+                    try:
+                        import importlib as _importlib
+
+                        mod_obj = _importlib.import_module(f"modules.{module_name}_module")
+                        if hasattr(mod_obj, "execute_function"):
+                            exec_start = time.perf_counter()
+                            result = await mod_obj.execute_function(
+                                func_name, arguments, user_id=1
+                            )
+                            exec_elapsed = (time.perf_counter() - exec_start) * 1000
+                            logger.debug(
+                                f"Executed module-level {module_name}.{func_name} in {exec_elapsed:.1f} ms"
+                            )
+                            return result
+                    except Exception as fallback_err:  # pragma: no cover
+                        logger.debug(
+                            f"Fallback module-level execute_function failed for {module_name}: {fallback_err}"
+                        )
+
+                    # Final fallback: try to call the method directly on the instance
+                    # e.g. SearchModule.search(user_id=..., **arguments)
+                    try:
+                        method = getattr(module, func_name, None)
+                        if callable(method):
+                            import inspect as _inspect
+                            exec_start = time.perf_counter()
+                            if _inspect.iscoroutinefunction(method):
+                                data = await method(user_id=1, **arguments)
+                            else:
+                                data = method(user_id=1, **arguments)
+                            exec_elapsed = (time.perf_counter() - exec_start) * 1000
+                            logger.debug(
+                                f"Executed direct method {module_name}.{func_name} in {exec_elapsed:.1f} ms"
+                            )
+                            # Normalize return to standard structure
+                            if isinstance(data, dict) and (
+                                "success" in data or "data" in data or "error" in data
+                            ):
+                                return data
+                            return {"success": True, "data": data}
+                    except Exception as direct_err:
+                        logger.debug(
+                            f"Direct method call failed for {module_name}.{func_name}: {direct_err}"
+                        )
+                    # Return structured error instead of plain string
+                    return {
+                        "success": False,
+                        "error": f"Module {module_name} does not support execute_function",
+                        "module": module_name,
+                        "function": func_name,
+                    }
 
             # Handle plugin manager functions (legacy)
             plugin_name = handler_info.get("plugin_name")

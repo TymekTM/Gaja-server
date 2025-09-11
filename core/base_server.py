@@ -17,7 +17,7 @@ from modules.ai_module import AIModule
 from config.config_loader import load_config, ConfigLoader
 from config.config_manager import initialize_database_manager
 from extended_webui import ExtendedWebUI
-from core.function_calling_system import FunctionCallingSystem
+from core.function_calling_system import get_function_calling_system
 from modules.onboarding_module import OnboardingModule
 from core.plugin_manager import plugin_manager
 from core.plugin_monitor import plugin_monitor
@@ -74,8 +74,8 @@ class BaseServerApp:
             self.ai_module = AIModule(self.config)
             logger.info("✅ AI module initialized")
 
-            # Initialize function calling system
-            self.function_system = FunctionCallingSystem()
+            # Initialize function calling system (use singleton)
+            self.function_system = get_function_calling_system()
             await self.function_system.initialize()
             logger.info("✅ Function calling system initialized")
 
@@ -176,7 +176,7 @@ class BaseServerApp:
         # Import loguru here to avoid circular imports
         from loguru import logger as loguru_logger
         
-        # Remove default logger
+    # Configure logger
         loguru_logger.remove()
         
         # Add file logging

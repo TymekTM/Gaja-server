@@ -118,7 +118,7 @@ class AIProviders:
         self._openai_client = None
         self._openrouter_client = None
         self._lmstudio_base_url = None  # resolved base URL (supports Docker/host)
-        # Removed deprecated provider clients (deepseek, anthropic, transformer)
+        
         self._modules: dict[str, Any] = {
             mod: AIProviders._safe_import(mod)
             for mod in ("ollama", "openai")
@@ -940,7 +940,7 @@ class AIProviders:
             logger.error("OpenAI error: %s", exc, exc_info=True)
             return {"message": {"content": f"Błąd OpenAI: {exc}"}}
 
-    # Removed deprecated chat providers (deepseek, anthropic, transformer)
+    
 
     async def chat_openrouter(
         self,
@@ -1663,7 +1663,7 @@ async def generate_response(
         use_function_calling: Whether to use OpenAI Function Calling or traditional approach.    Returns:
         A string containing the AI's response, potentially in JSON format for commands.
     """
-    import datetime  # (Legacy initialization block removed; API key resolution handled later)
+    import datetime
 
     def log_append(lines: list[str]):  # small helper to centralize logging writes
         try:

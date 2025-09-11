@@ -13,7 +13,10 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    ca-certificates \
+    tzdata \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-ca-certificates
 
 # Copy requirements first for better caching
 COPY requirements_server.txt .
@@ -23,8 +26,19 @@ RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir -r requirements_server.txt
 
 # Debug: List installed packages and verify critical packages
-RUN pip list | grep -E "(aiohttp|fastapi|uvicorn)"
-RUN python -c "import aiohttp, fastapi, uvicorn; print('Core packages verified')"
+RUN pip list | grep -E "(aiohttp|fastapi|uvicorn|scrapling)" || true
+RUN python - << 'PY'
+import sys
+print('Python:', sys.version)
+try:
+    from scrapling.parser import Selector
+    html = '<html><body><main><h1>T</h1><p>ok</p></main></body></html>'
+    s = Selector(html)
+    assert s.css_first('h1::text')
+    print('Scrapling parser OK')
+except Exception as e:
+    print('Scrapling parser check failed:', e)
+PY
 
 # Copy application code
 COPY . .

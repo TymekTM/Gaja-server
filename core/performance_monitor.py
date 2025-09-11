@@ -287,7 +287,7 @@ def clear_performance_stats():
 # Load existing stats on module import
 load_and_aggregate_stats()
 
-# Example usage (can be removed later)
+# Example usage
 # @measure_performance
 # def example_function(duration):
 #     time.sleep(duration)

@@ -181,3 +181,4 @@ cython_debug/
 .cursorindexingignore
 /user_data
 *.db
+/modules/Asystent_Server_data_fallback

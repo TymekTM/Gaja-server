@@ -81,7 +81,7 @@ def build_full_system_prompt(
     active_window_title: str | None,  # Added
     track_active_window_setting: bool,  # Added to control inclusion
     module_result: str | None = None,  # Added for intent result
-    # tool_suggestion removed to avoid forced module suggestions
+    
     tool_suggestion: str | None = None,
     user_name: str | None = None,  # Added user name parameter
 ) -> str:
@@ -95,7 +95,7 @@ def build_full_system_prompt(
     language_segment = build_language_info_prompt(
         detected_language, language_confidence
     )
-    # Remove automatic tool suggestion to prevent core module over-suggestion
+    
     suggestion_segment = ""
     tools_segment = build_tools_prompt(tools_description)
     active_window_segment = ""
