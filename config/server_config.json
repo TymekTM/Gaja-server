@@ -9,10 +9,13 @@
         "echo": false
     },
     "ai": {
-        "provider": "openai",
-        "model": "gpt-5-nano",
+        "provider": "openrouter",
+        "model": "openai/gpt-oss-120b",
         "temperature": 0.7,
-        "max_tokens": 1000
+        "max_tokens": 1000,
+        "provider_models": {
+            "openrouter": "openai/gpt-oss-120b"
+        }
     },
     "tts": {
         "model": "gpt-4o-mini-tts",
@@ -22,7 +25,8 @@
     },
     "api_keys": {
         "openai": "YOUR_OPENAI_API_KEY_HERE",
-        "anthropic": "YOUR_ANTHROPIC_API_KEY_HERE"
+        "anthropic": "YOUR_ANTHROPIC_API_KEY_HERE",
+        "openrouter": "YOUR_OPENROUTER_API_KEY_HERE"
     },
     "plugins": {
         "auto_load": true,

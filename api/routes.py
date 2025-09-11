@@ -818,33 +818,57 @@ async def get_memories(
     limit: int = 20,
     current_user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Get user memories."""
+    """Get user conversation memories built from message history.
+
+    Pairs consecutive user/assistant messages into compact entries for UI.
+    """
     try:
         user_id = current_user["id"]
 
-        # Get memories from database
-        if hasattr(server_app, "db_manager"):
-            history = await server_app.db_manager.get_user_history(user_id, limit=limit)
-
-            memories = []
-            for i, item in enumerate(history):
-                memories.append(
-                    {
-                        "id": str(i),
-                        "userId": user_id,
-                        "content": item.get("user_query", "")
-                        + " -> "
-                        + item.get("ai_response", ""),
-                        "createdAt": item.get("timestamp", datetime.now().isoformat()),
-                        "importance": 3,  # Default importance
-                        "isDeleted": False,
-                        "tags": ["conversation"],
-                    }
-                )
-
-            return {"memories": memories, "total": len(memories)}
-        else:
+        if not hasattr(server_app, "db_manager"):
             return {"memories": [], "total": 0}
+
+        # Fetch enough raw messages to build ~limit pairs
+        raw = await server_app.db_manager.get_user_history(user_id, limit=limit * 2)
+        pairs = []
+        last_user = None
+        last_ts = None
+        for msg in raw:
+            role = (msg.get("role") or "").lower()
+            content = (msg.get("content") or "").strip()
+            ts = msg.get("timestamp")
+            if role == "user" and content:
+                last_user = content
+                last_ts = ts
+            elif role == "assistant" and content:
+                if last_user:
+                    pairs.append({
+                        "question": last_user,
+                        "answer": content,
+                        "timestamp": last_ts or ts,
+                    })
+                    last_user = None
+                    last_ts = None
+        # If dangling user question left without answer, include it
+        if last_user:
+            pairs.append({"question": last_user, "answer": "", "timestamp": last_ts})
+
+        # Map to memory objects expected by UI
+        memories = []
+        for i, p in enumerate(pairs[-limit:]):  # last N pairs
+            memories.append(
+                {
+                    "id": str(i),
+                    "userId": user_id,
+                    "content": f"{p['question']} -> {p['answer']}",
+                    "createdAt": p.get("timestamp") or datetime.now().isoformat(),
+                    "importance": 3,
+                    "isDeleted": False,
+                    "tags": ["conversation"],
+                }
+            )
+
+        return {"memories": memories, "total": len(memories)}
 
     except Exception as e:
         logger.error(f"Get memories error: {e}")

@@ -117,6 +117,9 @@ class GAJAServerApp(BaseServerApp):
             elif message_type == "startup_briefing":
                 await self._handle_startup_briefing(user_id)
 
+            elif message_type == "clarification_response":
+                await self._handle_clarification_response(user_id, message_data)
+
             elif message_type == "proactive_check":
                 await self._handle_proactive_check(user_id)
 
@@ -360,6 +363,66 @@ class GAJAServerApp(BaseServerApp):
             logger.error(f"Plugin list error for user {user_id}: {e}")
             await self.connection_manager.send_to_user(
                 user_id, WebSocketMessage("error", {"message": "Failed to get plugin list", "error": str(e)})
+            )
+
+    async def _handle_clarification_response(self, user_id: str, message_data: dict) -> None:
+        """Handle clarification response from client."""
+        data = message_data.get("data", {})
+        response = data.get("response", "")
+        context = data.get("context", {})
+        original_query = context.get("original_query", "")
+        
+        logger.info(f"Received clarification response from {user_id}: {response}")
+        
+        if not response:
+            await self.connection_manager.send_to_user(
+                user_id, WebSocketMessage("error", {"message": "Empty clarification response"})
+            )
+            return
+        
+        # Process clarification response as a new AI query
+        query_id = f"{user_id}_{int(time.time() * 1000)}"
+        start_query_tracking(query_id, user_id, response)
+        start_server_timer(query_id, "total_server")
+        
+        try:
+            start_server_timer(query_id, "ai_processing")
+            
+            # Get conversation history
+            history = []
+            if self.db_manager:
+                try:
+                    history = await self.db_manager.get_user_history(user_id, limit=20)
+                except Exception as hist_err:
+                    logger.warning(f"Failed to get history for user {user_id}: {hist_err}")
+            
+            # Add clarification context
+            clarification_context = {
+                "history": history,
+                "user_id": user_id,
+                "is_clarification_response": True,
+                "original_query": original_query,
+                "clarification_answer": response
+            }
+            
+            ai_result = await self.ai_module.process_query(response, clarification_context)
+            end_server_timer(query_id, "ai_processing")
+            
+            # Handle clarification requests
+            if ai_result.get("type") == "clarification_request":
+                await self._handle_clarification(user_id, ai_result, response, query_id)
+                return
+
+            # Handle normal AI response
+            await self._handle_ai_response(user_id, ai_result, response, message_data, query_id)
+            
+        except Exception as e:
+            logger.error(f"Clarification response error for user {user_id}: {e}")
+            record_server_error(query_id, f"Clarification response error: {e}")
+            finish_server_query(query_id)
+            await self.connection_manager.send_to_user(
+                user_id,
+                WebSocketMessage("error", {"message": "Failed to process clarification response", "error": str(e)}),
             )
 
     async def _handle_startup_briefing(self, user_id: str) -> None:

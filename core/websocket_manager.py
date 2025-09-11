@@ -240,7 +240,10 @@ class ConnectionManager:
         }
 
     async def handle_message(self, user_id: str, message_data: dict) -> dict | None:
-        """Obsługuje wiadomość od użytkownika."""
+        """Obsługuje wiadomość od użytkownika.
+        Zapewnia wsteczną kompatybilność: jeśli brakuje pola 'data',
+        zbuduj je z top‑level pól (query/response/context/text/message).
+        """
         try:
             # Aktualizuj statystyki
             self.stats["messages_received"] += 1
@@ -251,13 +254,24 @@ class ConnectionManager:
             message_type = message_data.get("type", "unknown")
             logger.debug(f"Received message from user {user_id}: {message_type}")
 
+            # Zbuduj kanoniczne 'data' jeśli nie przyszło
+            data = message_data.get("data")
+            canonical: dict | None = None
+            if data is None:
+                tmp = {}
+                for k in ("query", "response", "context", "text", "message"):
+                    if k in message_data and message_data.get(k) is not None:
+                        tmp[k] = message_data.get(k)
+                canonical = tmp or None
+
             # Zwróć wiadomość dla dalszego przetwarzania
             return {
                 "user_id": user_id,
                 "type": message_type,
-                "data": message_data.get("data"),
-                "query": message_data.get("query"),
-                "context": message_data.get("context"),
+                "data": data if data is not None else canonical,
+                "query": message_data.get("query") or ((canonical or {}).get("query") if canonical else None),
+                "response": message_data.get("response") or ((canonical or {}).get("response") if canonical else None),
+                "context": message_data.get("context") or ((canonical or {}).get("context") if canonical else None),
                 "timestamp": time.time(),
             }
 

@@ -60,15 +60,15 @@ def create_default_config() -> dict[str, Any]:
         "server": {"host": "0.0.0.0", "port": 8000, "debug": False},
         "database": {"url": "sqlite:///./server_data.db", "echo": False},
         "ai": {
-            "provider": "openai",
-            # Domyślny model zaktualizowany do gpt-5-nano (wcześniej gpt-4.1-nano)
+            "provider": "openrouter",
             # Jeśli chcesz wymusić inny model ustaw zmienną środowiskową GAJA_AI_MODEL
-            "model": "gpt-5-nano",
+            "model": "openai/gpt-oss-120b",
             "temperature": 0.7,
             "max_tokens": 1000,
             # Domyślne modele per‑provider (gdy użytkownik przełącza się w Debug Center)
             "provider_models": {
-                "openrouter": "openai/gpt-oss-20b:free"
+                "openrouter": "openai/gpt-oss-120b",
+                "openai": "gpt-5-nano"
             },
         },
         "api_keys": {
@@ -289,11 +289,8 @@ _config = load_config()
 STT_MODEL = _config.get("ai", {}).get("stt_model", "base")
 # Pozwól nadpisać model zmienną środowiskową GAJA_AI_MODEL
 _env_model = os.environ.get("GAJA_AI_MODEL")
-_configured_model = _config.get("ai", {}).get("model", "gpt-5-nano")
+_configured_model = _config.get("ai", {}).get("model", "openai/gpt-oss-120b")
 
-# Backward compatibility: jeśli ktoś nadal ma stary wpis w configu "gpt-4.1-nano" zmieniamy na nowy
-if _configured_model == "gpt-4.1-nano":
-    _configured_model = "gpt-5-nano"
 
 # Opcjonalny droższy model: jeśli ustawiono GAJA_USE_GPT5_MINI=1 i nie ustawiono ręcznie modelu, przełącz na gpt-5-mini
 if (
@@ -303,5 +300,5 @@ if (
     _configured_model = "gpt-5-mini"
 
 MAIN_MODEL = _env_model or _configured_model
-PROVIDER = _config.get("ai", {}).get("provider", "openai")
+PROVIDER = _config.get("ai", {}).get("provider", "openrouter")
 DEEP_MODEL = _config.get("ai", {}).get("deep_model", MAIN_MODEL)

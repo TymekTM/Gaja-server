@@ -134,6 +134,21 @@ class ServerApp:
                 # DEBUG: Log actual user query to debug inappropriate tool calls
                 logger.warning(f"🎯 USER QUERY: '{query}' (type: {message_type})")
 
+                # Jeśli oczekujemy na doprecyzowanie od użytkownika, potraktuj tę
+                # zwykłą wiadomość jako odpowiedź doprecyślającą (fallback zgodny z klientem)
+                try:
+                    pending = self.connection_manager.connection_metadata.get(user_id, {}).get("pending_clarification")
+                except Exception:
+                    pending = None
+
+                # Ustal tekst odpowiedzi z możliwych miejsc
+                plain_query = query or message_data.get("query") or ""
+                if pending and plain_query:
+                    logger.info("Pending clarification detected; treating incoming query as clarification response")
+                    original_query = pending.get("original_query", "") if isinstance(pending, dict) else ""
+                    await self._process_clarification_response(user_id, plain_query, original_query, message_data)
+                    return
+
                 if not query:
                     await self.connection_manager.send_to_user(
                         user_id, WebSocketMessage("error", {"message": "Empty query"})
@@ -252,6 +267,25 @@ class ServerApp:
                             "original_query": query,
                         }
                         
+                        # Zapisz stan oczekującej prośby o doprecyzowanie po stronie serwera
+                        try:
+                            meta = self.connection_manager.connection_metadata.setdefault(user_id, {})
+                            meta["pending_clarification"] = {
+                                "question": question,
+                                "original_query": query,
+                                "timestamp": time.time(),
+                                # Przenieś informacje z clarification_data (jeśli model je dostarczył)
+                                "function": clarification_data.get("function"),
+                                "parameter": clarification_data.get("parameter"),
+                            }
+                            # Heurystyka: jeśli wygląda na pogodę, zapisz spodziewaną funkcję
+                            if self._looks_like_weather_intent(query) and not meta["pending_clarification"].get("function"):
+                                meta["pending_clarification"]["function"] = "weather_get_forecast"
+                                meta["pending_clarification"]["parameter"] = "location"
+                            logger.debug("Stored pending_clarification in connection metadata")
+                        except Exception as e:
+                            logger.debug(f"Could not store pending_clarification: {e}")
+
                         if tts_audio:
                             response_data["tts_audio"] = base64.b64encode(tts_audio).decode('utf-8')
                             # Add TTS configuration for client
@@ -518,6 +552,38 @@ class ServerApp:
                 except Exception as e:
                     logger.error(f"Proactive check error for user {user_id}: {e}")
 
+            elif message_type == "clarification_response":
+                # Obsłuż odpowiedź doprecyślającą z klienta (również gdy data==None)
+                raw_data = message_data.get("data")
+                response = ""
+                context = {}
+                if isinstance(raw_data, dict):
+                    response = raw_data.get("response", "")
+                    context = raw_data.get("context", {}) or {}
+                elif isinstance(raw_data, str):
+                    response = raw_data
+                
+                # Fallback: klienci mogą wysyłać sam tekst jako zwykłe pole 'query'
+                if not response:
+                    response = message_data.get("query") or message_data.get("response") or ""
+                
+                # Ustal oryginalne pytanie: z kontekstu lub z metadanych połączenia
+                original_query = ""
+                if isinstance(context, dict):
+                    original_query = context.get("original_query", "")
+                if not original_query:
+                    try:
+                        meta = self.connection_manager.connection_metadata.get(user_id, {})
+                        pending = meta.get("pending_clarification")
+                        if isinstance(pending, dict):
+                            original_query = pending.get("original_query", "")
+                    except Exception:
+                        pass
+
+                logger.info(f"Received clarification response from {user_id}: {response}")
+
+                await self._process_clarification_response(user_id, response, original_query, message_data)
+                
             elif message_type == "user_context_update":
                 # Handle user context updates (for analytics, debugging, etc.)
                 context_data = message_data.get("data", {})
@@ -546,6 +612,299 @@ class ServerApp:
                     "error", {"message": "Internal server error", "error": str(e)}
                 ),
             )
+
+    async def _process_clarification_response(self, user_id: str, response: str, original_query: str, message_data: dict | None = None) -> None:
+        """Wspólny przebieg obsługi odpowiedzi doprecyślającej.
+        Akceptuje odpowiedź podaną jako zwykła wiadomość lub w strukturze clarification_response.
+        """
+        # Walidacja
+        if not response:
+            await self.connection_manager.send_to_user(
+                user_id, WebSocketMessage("error", {"message": "Empty clarification response"})
+            )
+            return
+
+        # Odczytaj pending_clarification zanim go wyczyścisz (potrzebny do fast‑path)
+        pending_copy = None
+        try:
+            meta = self.connection_manager.connection_metadata.setdefault(user_id, {})
+            if "pending_clarification" in meta:
+                pending_copy = dict(meta["pending_clarification"]) if isinstance(meta["pending_clarification"], dict) else meta["pending_clarification"]
+                del meta["pending_clarification"]
+        except Exception:
+            pending_copy = None
+
+        query_id = f"{user_id}_{int(time.time() * 1000)}"
+        start_query_tracking(query_id, user_id, response)
+        start_server_timer(query_id, "total_server")
+
+        try:
+            start_server_timer(query_id, "ai_processing")
+
+            # Historia
+            history = []
+            if self.db_manager:
+                try:
+                    history = await self.db_manager.get_user_history(user_id, limit=20)
+                    logger.debug(f"Retrieved {len(history)} messages from history for user {user_id}")
+                except Exception as hist_err:
+                    logger.warning(f"Failed to get history for user {user_id}: {hist_err}")
+
+            clarification_context = {
+                "history": history,
+                "user_id": user_id,
+                "is_clarification_response": True,
+                "original_query": original_query or "",
+                "clarification_answer": response,
+            }
+
+            # Fast-path: jeśli oczekujemy lokalizacji do pogody, spróbuj od razu wywołać narzędzie zamiast pytać model
+            # Użyj kopii pending z początku metody
+            expected_fn = None
+            if isinstance(pending_copy, dict):
+                expected_fn = pending_copy.get("function")
+            if not expected_fn and self._looks_like_weather_intent(original_query):
+                expected_fn = "weather_get_forecast"
+
+            if expected_fn == "weather_get_forecast" and response.strip():
+                # Spróbuj znormalizować lokalizację i ustalić liczbę dni
+                norm_loc = self._normalize_location(response.strip())
+                days = self._extract_days_from_text(original_query) or 2
+                fast_text = await self._try_fast_weather_summary(user_id, norm_loc, days=days)
+                if fast_text:
+                    end_server_timer(query_id, "ai_processing")
+                    # Zapisz do historii z pełnym pytaniem
+                    if self.db_manager:
+                        try:
+                            query_to_save = original_query or response
+                            if original_query and response and response.strip() != original_query.strip():
+                                query_to_save = f"{original_query}\n[uzupełnienie: {response}]"
+                            wrapped = json.dumps({"text": fast_text, "command": "", "params": {"fast_tool_path": True}}, ensure_ascii=False)
+                            await self.db_manager.save_interaction(user_id, query_to_save, wrapped)
+                        except Exception as save_err:
+                            logger.warning(f"Failed to save conversation history: {save_err}")
+
+                    # TTS i odpowiedź do klienta
+                    tts_audio = None
+                    try:
+                        start_server_timer(query_id, "tts_generation")
+                        tts_audio = await self._generate_tts_audio(fast_text)
+                        end_server_timer(query_id, "tts_generation")
+                    except Exception:
+                        end_server_timer(query_id, "tts_generation")
+                        tts_audio = None
+
+                    response_data = {
+                        "query": response,
+                        "timestamp": (message_data or {}).get("timestamp") if isinstance(message_data, dict) else None,
+                        "response": json.dumps({"text": fast_text, "command": "", "params": {}}, ensure_ascii=False),
+                    }
+                    if tts_audio:
+                        response_data["tts_audio"] = base64.b64encode(tts_audio).decode("utf-8")
+                        tts_config = self.config.get("tts", {}) if self.config else {}
+                        response_data["tts_config"] = {"volume": tts_config.get("volume", 1.0), "tts_metadata": {"format": "mp3"}}
+
+                    await self.connection_manager.send_to_user(user_id, WebSocketMessage("ai_response", response_data))
+                    finish_server_query(query_id)
+                    return
+
+            # Brak fast‑path – przekaż do modelu
+            ai_result = await self.ai_module.process_query(response, clarification_context)
+            end_server_timer(query_id, "ai_processing")
+
+            # Jeśli kolejna prośba o doprecyzowanie – wyślij i zaktualizuj pending
+            if ai_result.get("type") == "clarification_request":
+                clarification_data = ai_result.get("clarification_data", {})
+
+                # TTS
+                tts_audio = None
+                question = clarification_data.get("question", "")
+                if question:
+                    try:
+                        start_server_timer(query_id, "tts_generation")
+                        tts_audio = await self._generate_tts_audio(question)
+                        end_server_timer(query_id, "tts_generation")
+                    except Exception as e:
+                        end_server_timer(query_id, "tts_generation")
+                        logger.error(f"Failed to generate TTS for follow-up clarification: {e}")
+
+                response_payload = {
+                    "question": question,
+                    "context": clarification_data.get("context", ""),
+                    "actions": clarification_data.get("actions", {}),
+                    "timestamp": clarification_data.get("timestamp"),
+                    "original_query": original_query or "",
+                }
+
+                # Zapisz nowy pending_clarification
+                try:
+                    meta = self.connection_manager.connection_metadata.setdefault(user_id, {})
+                    meta["pending_clarification"] = {
+                        "question": question,
+                        "original_query": original_query or "",
+                        "timestamp": time.time(),
+                    }
+                except Exception:
+                    pass
+
+                if tts_audio:
+                    response_payload["tts_audio"] = base64.b64encode(tts_audio).decode("utf-8")
+                    tts_config = self.config.get("tts", {}) if self.config else {}
+                    response_payload["tts_config"] = {
+                        "volume": tts_config.get("volume", 1.0),
+                        "tts_metadata": {"format": "mp3"},
+                    }
+
+                await self.connection_manager.send_to_user(
+                    user_id, WebSocketMessage("clarification_request", response_payload)
+                )
+                finish_server_query(query_id)
+                return
+
+            # W przeciwnym razie – normalna odpowiedź
+            ai_response = ai_result.get("response", "")
+
+            if self.db_manager:
+                try:
+                    # Zapisz pełne pytanie wraz z doprecyzowaniem, aby historia była czytelna
+                    query_to_save = original_query or response or ""
+                    if original_query and response and response.strip() and response.strip() != original_query.strip():
+                        query_to_save = f"{original_query}\n[uzupełnienie: {response}]"
+                    await self.db_manager.save_interaction(user_id, query_to_save, ai_response)
+                    logger.debug(f"Saved clarification conversation to history for user {user_id}")
+                except Exception as save_err:
+                    logger.warning(f"Failed to save conversation history: {save_err}")
+
+            # Wygeneruj TTS (opcjonalnie)
+            tts_audio = None
+            try:
+                parsed_response = json.loads(ai_response)
+                if isinstance(parsed_response, dict) and "text" in parsed_response:
+                    text_to_speak = parsed_response["text"]
+                    if text_to_speak:
+                        start_server_timer(query_id, "tts_generation")
+                        tts_audio = await self._generate_tts_audio(text_to_speak)
+                        end_server_timer(query_id, "tts_generation")
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+            response_data = {
+                "query": response,
+                "timestamp": (message_data or {}).get("timestamp") if isinstance(message_data, dict) else None,
+                "response": ai_response,
+            }
+
+            if tts_audio:
+                response_data["tts_audio"] = base64.b64encode(tts_audio).decode("utf-8")
+                tts_config = self.config.get("tts", {}) if self.config else {}
+                response_data["tts_config"] = {
+                    "volume": tts_config.get("volume", 1.0),
+                    "tts_metadata": {"format": "mp3"},
+                }
+
+            await self.connection_manager.send_to_user(
+                user_id, WebSocketMessage("ai_response", response_data)
+            )
+            finish_server_query(query_id)
+
+        except Exception as e:
+            logger.error(f"Clarification response error for user {user_id}: {e}")
+            finish_server_query(query_id)
+            await self.connection_manager.send_to_user(
+                user_id,
+                WebSocketMessage(
+                    "error",
+                    {"message": "Failed to process clarification response", "error": str(e)},
+                ),
+            )
+
+    def _looks_like_weather_intent(self, text: str | None) -> bool:
+        try:
+            if not text:
+                return False
+            t = text.lower()
+            return any(kw in t for kw in ["pogod", "pada", "deszcz", "prognoz", "temperatur"]) \
+                or ("jutro" in t and ("czy" in t or "będzie" in t))
+        except Exception:
+            return False
+
+    def _normalize_location(self, text: str) -> str:
+        """Prosta normalizacja polskich fraz lokalizacyjnych i literówek.
+        Usuwa przyimki i zbędne słowa grzecznościowe; poprawia wybrane formy przypadków.
+        """
+        t = (text or "").strip().lower()
+        # Usuń przecinki i kropki na końcach
+        t = t.replace(",", " ").replace(".", " ")
+        # Usuń częste przyimki i wtrącenia na początku
+        prefixes = ["w ", "we ", "na ", "do ", "dla ", "z ", "ze ", "od ", "edla "]
+        for p in prefixes:
+            if t.startswith(p):
+                t = t[len(p):]
+                break
+        # Usuń słowa grzecznościowe / wtrącenia
+        fillers = {"poprosze", "poproszę", "prosze", "proszę", "tam", "mi", "by", "bym", "poprasił", "poprosił", "prosił"}
+        words = [w for w in t.split() if w not in fillers]
+        t = " ".join(words).strip()
+        # Słownik literówek / przypadków (minimalny)
+        fixes = {
+            "sosnowcu": "sosnowiec",
+            "sosnowca": "sosnowiec",
+            "sosnofca": "sosnowiec",
+            "sosnofiec": "sosnowiec",
+        }
+        tokens = t.split()
+        tokens = [fixes.get(tok, tok) for tok in tokens]
+        norm = " ".join(tokens).strip()
+        # Tytułowy zapis (pierwsza wielka litera)
+        return norm.capitalize()
+
+    def _extract_days_from_text(self, text: str | None) -> int | None:
+        try:
+            if not text:
+                return None
+            t = text.lower()
+            if "jutro" in t:
+                return 1
+            return None
+        except Exception:
+            return None
+
+    async def _try_fast_weather_summary(self, user_id: str, location: str, days: int = 2) -> str | None:
+        """Szybka ścieżka: wywołaj narzędzie pogody i zbuduj zwięzłe podsumowanie bez modelu.
+        Zwraca tekst podsumowania lub None jeśli coś poszło nie tak.
+        """
+        try:
+            if not hasattr(self, "function_system") or not self.function_system:
+                return None
+            args = {"location": location, "days": max(1, min(days, 3))}
+            result = await self.function_system.execute_function("weather_get_forecast", args)
+            if not isinstance(result, dict) or not result.get("success"):
+                return None
+            data = result.get("data") or {}
+            loc = data.get("location") or {}
+            name = (loc.get("name") or location).strip()
+            country = (loc.get("country") or "").strip()
+            parts = []
+            if country:
+                header = f"Prognoza dla {name}, {country}:"
+            else:
+                header = f"Prognoza dla {name}:"
+            parts.append(header)
+            fc = data.get("forecast") or []
+            # Formatuj maks. dwa najbliższe dni
+            for i, day in enumerate(fc[:2]):
+                d = day.get("date") or ""
+                desc = (day.get("description") or "").strip()
+                tmin = day.get("min_temp")
+                tmax = day.get("max_temp")
+                seg = f"{d}: {desc}".strip()
+                if tmin is not None and tmax is not None:
+                    seg += f", min {tmin}°C, max {tmax}°C"
+                parts.append(seg)
+            return "\n".join(parts)
+        except Exception as e:
+            logger.debug(f"Fast weather path failed: {e}")
+            return None
 
     async def initialize(self):
         """Initialize all server components."""

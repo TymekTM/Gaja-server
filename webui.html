@@ -145,7 +145,7 @@
 
         function connect() {
             try {
-                ws = new WebSocket(`ws://localhost:5000/ws/${userId}`);
+                ws = new WebSocket(`ws://localhost:8001/ws/${userId}`);
 
                 ws.onopen = function(event) {
                     document.getElementById('wsStatus').textContent = 'Połączony';
@@ -186,6 +186,9 @@
             switch (data.type) {
                 case 'ai_response':
                     addMessage('ai', data.response);
+                    break;
+                case 'clarification_request':
+                    handleClarificationRequest(data);
                     break;
                 case 'function_result':
                     addMessage('system', `Plugin ${data.function}: ${data.result}`);
@@ -237,6 +240,50 @@
                 ws.send(JSON.stringify(data));
                 addMessage('user', message);
                 input.value = '';
+            }
+        }
+
+        function handleClarificationRequest(data) {
+            const question = data.question || 'Potrzebuję wyjaśnienia';
+            addMessage('system', `Pytanie: ${question}`);
+            
+            // Show clarification input
+            const clarificationDiv = document.createElement('div');
+            clarificationDiv.className = 'clarification-request';
+            clarificationDiv.innerHTML = `
+                <div style="margin: 10px 0; padding: 10px; background: #f0f0f0; border-radius: 5px;">
+                    <p><strong>Potrzebuję wyjaśnienia:</strong> ${question}</p>
+                    <input type="text" id="clarificationInput" placeholder="Twoja odpowiedź..." style="width: 70%; padding: 5px; margin-right: 10px;">
+                    <button onclick="sendClarificationResponse('${data.original_query || ''}')">Wyślij</button>
+                </div>
+            `;
+            document.getElementById('messages').appendChild(clarificationDiv);
+            document.getElementById('clarificationInput').focus();
+        }
+
+        function sendClarificationResponse(originalQuery) {
+            const input = document.getElementById('clarificationInput');
+            const response = input.value.trim();
+            
+            if (response && ws && ws.readyState === WebSocket.OPEN) {
+                const data = {
+                    type: 'clarification_response',
+                    data: {
+                        response: response,
+                        context: {
+                            original_query: originalQuery,
+                            source: 'web_ui'
+                        }
+                    }
+                };
+                ws.send(JSON.stringify(data));
+                addMessage('user', `Odpowiedź: ${response}`);
+                
+                // Remove clarification input
+                const clarificationDiv = document.querySelector('.clarification-request');
+                if (clarificationDiv) {
+                    clarificationDiv.remove();
+                }
             }
         }
 

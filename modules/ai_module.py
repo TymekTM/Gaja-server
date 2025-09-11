@@ -171,6 +171,30 @@ class AIProviders:
         self._provider_status_cache[name] = {"ok": ok, "ts": time.time()}
         return ok
 
+    @staticmethod
+    def map_model_for_provider(model: str, provider: str) -> str:
+        """Return a provider-compatible model identifier.
+
+        - For OpenAI, reject obvious OpenRouter-style IDs (with vendor prefix or `:` tag)
+          and map to a safe default from config or environment.
+        - For other providers, keep the original unless we have a clear rule.
+        """
+        try:
+            m = (model or "").strip()
+            p = (provider or "").strip().lower()
+            if p == "openai":
+                # Detect OpenRouter-style alias (e.g., "openai/gpt-oss-120b", "vendor/model:tag")
+                if "/" in m or ":" in m or "oss" in m:
+                    # Choose explicit override if available
+                    override = _config.get("ai", {}).get("provider_models", {}).get("openai")
+                    env_override = os.getenv("GAJA_OPENAI_MODEL")
+                    # Conservative default that exists in our codepaths
+                    fallback = env_override or override or "gpt-5-nano"
+                    return fallback
+            return m
+        except Exception:
+            return model
+
     def check_ollama(self) -> bool:
         cached = self._cached_status("ollama")
         if cached is not None:
@@ -1432,13 +1456,16 @@ async def chat_with_providers(
                 if tracer:
                     tracer.event("provider_check_pass", {"provider": provider_name})
 
+                # Map model ID to provider-compatible value when necessary
+                model_mapped = AIProviders.map_model_for_provider(model, provider_name)
+
                 # Handle different providers with appropriate parameters
                 chat_func = prov.get("chat")
                 if provider_name == "openai":
                     if tracer:
                         tracer.event("provider_request_start", {"provider": provider_name})
                     result = await chat_func(  # type: ignore[misc]
-                        model,
+                        model_mapped,
                         messages,
                         images,
                         functions,
@@ -1455,7 +1482,7 @@ async def chat_with_providers(
                     if tracer:
                         tracer.event("provider_request_start", {"provider": provider_name})
                     result = await chat_func(  # type: ignore[misc]
-                        model,
+                        model_mapped,
                         messages,
                         images,
                         functions,
@@ -1472,7 +1499,7 @@ async def chat_with_providers(
                     if tracer:
                         tracer.event("provider_request_start", {"provider": provider_name})
                     result = await chat_func(  # type: ignore[misc]
-                        model,
+                        model_mapped,
                         messages,
                         images,
                         functions,
@@ -1772,7 +1799,9 @@ async def generate_response(
             if isinstance(msg_obj, dict):
                 content = (msg_obj.get("content") or "").strip()
         fallback_used = False  # track if alternate provider succeeded
-        if not content:
+        # Optional guard: allow disabling provider fallback via env
+        disable_fallback = os.getenv("GAJA_DISABLE_PROVIDER_FALLBACK", "0") in ("1", "true", "True")
+        if (not content) and (not disable_fallback) and not (isinstance(resp, dict) and (resp.get("tool_calls_executed") or resp.get("clarification_request"))):
             # Attempt a single fallback provider if available (different from selected default)
             try:
                 alt_provider = None
