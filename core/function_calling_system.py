@@ -249,6 +249,11 @@ class FunctionCallingSystem:
         self._functions_cache = functions
         return functions
 
+    def invalidate_cache(self) -> None:
+        """Force cache rebuild so newly loaded plugins become visible."""
+        self._functions_cache = None
+        logger.debug("Function definitions cache invalidated")
+
     def _create_main_function(
         self, module_name: str, module_info: dict[str, Any]
     ) -> dict[str, Any] | None:

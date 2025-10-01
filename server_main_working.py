@@ -120,7 +120,7 @@ class ServerApp:
                 for plugin in plugins:
                     if plugin["enabled"]:
                         await plugin_manager.enable_plugin_for_user(
-                            plugin["plugin_name"], user["user_id"]
+                            user["user_id"], plugin["plugin_name"]
                         )
                         logger.info(
                             f"Plugin {plugin['plugin_name']} enabled for user {user['user_id']}"

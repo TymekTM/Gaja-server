@@ -55,6 +55,16 @@ class PluginManager:
         # Create plugins directory if it doesn't exist
         self.plugins_directory.mkdir(exist_ok=True)
 
+    def _invalidate_function_cache(self) -> None:
+        """Notify function calling system that function list must be rebuilt."""
+        try:
+            from core.function_calling_system import get_function_calling_system
+
+            system = get_function_calling_system()
+            system.invalidate_cache()
+        except Exception as exc:  # pragma: no cover - best effort
+            logger.debug(f"Function cache invalidation skipped: {exc}")
+
     async def discover_plugins(self) -> list[PluginInfo]:
         """Discover all available plugins."""
         discovered = []
@@ -226,6 +236,7 @@ class PluginManager:
                         logger.debug(f"Registered function: {full_name}")
 
             logger.info(f"Plugin {plugin_name} loaded successfully")
+            self._invalidate_function_cache()
             return True
 
         except Exception as e:
@@ -260,6 +271,7 @@ class PluginManager:
             plugin_info.loaded = False
 
             logger.info(f"Plugin {plugin_name} unloaded successfully")
+            self._invalidate_function_cache()
             return True
 
         except Exception as e:
@@ -294,6 +306,7 @@ class PluginManager:
         self.plugins[plugin_name].enabled = True
 
         logger.info(f"Plugin {plugin_name} enabled for user {user_id}")
+        self._invalidate_function_cache()
         return True
 
     async def disable_plugin_for_user(self, user_id: str, plugin_name: str) -> bool:
@@ -317,6 +330,7 @@ class PluginManager:
             self.plugins[plugin_name].enabled = False
 
         logger.info(f"Plugin {plugin_name} disabled for user {user_id}")
+        self._invalidate_function_cache()
         return True
 
     def get_user_plugins(self, user_id: str) -> dict[str, bool]:
@@ -454,6 +468,7 @@ class PluginManager:
             await self.enable_plugin_for_user(user_id, plugin_name)
 
         logger.info(f"Plugin {plugin_name} reloaded successfully")
+        self._invalidate_function_cache()
         return True
 
 

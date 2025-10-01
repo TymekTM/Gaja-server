@@ -419,7 +419,7 @@ class ServerApp:
                 try:
                     if action == "enable":
                         await plugin_manager.enable_plugin_for_user(
-                            plugin_name, user_id
+                            user_id, plugin_name
                         )
                         if self.db_manager:
                             await self.db_manager.update_user_plugin_status(
@@ -428,7 +428,7 @@ class ServerApp:
                         status = "enabled"
                     else:
                         await plugin_manager.disable_plugin_for_user(
-                            plugin_name, user_id
+                            user_id, plugin_name
                         )
                         if self.db_manager:
                             await self.db_manager.update_user_plugin_status(
@@ -987,7 +987,7 @@ class ServerApp:
                 for plugin in plugins:
                     if plugin["enabled"]:
                         await plugin_manager.enable_plugin_for_user(
-                            plugin["plugin_name"], user["user_id"]
+                            user["user_id"], plugin["plugin_name"]
                         )
                         logger.info(
                             f"Plugin {plugin['plugin_name']} enabled for user {user['user_id']}"

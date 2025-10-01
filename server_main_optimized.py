@@ -312,12 +312,12 @@ class GAJAServerApp(BaseServerApp):
             from core.plugin_manager import plugin_manager
             
             if action == "enable":
-                await plugin_manager.enable_plugin_for_user(plugin_name, user_id)
+                await plugin_manager.enable_plugin_for_user(user_id, plugin_name)
                 if self.db_manager:
                     await self.db_manager.update_user_plugin_status(user_id, plugin_name, True)
                 status = "enabled"
             else:
-                await plugin_manager.disable_plugin_for_user(plugin_name, user_id)
+                await plugin_manager.disable_plugin_for_user(user_id, plugin_name)
                 if self.db_manager:
                     await self.db_manager.update_user_plugin_status(user_id, plugin_name, False)
                 status = "disabled"
