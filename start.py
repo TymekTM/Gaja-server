@@ -104,7 +104,7 @@ class GajaServerStarter:
     def check_python_version(self) -> bool:
         """Check if Python version is compatible."""
         if sys.version_info < (3, 11):
-            self.logger.error(f"Python 3.11+ required, found {sys.version}")
+            self.logger.warning(f"Python 3.11+ recommended, detected {sys.version} — console mode unavailable")
             return False
         return True
     
@@ -846,33 +846,56 @@ class GajaServerStarter:
             return self.handle_docker_command(args.command)
         
         # Step 1: Check Python version
-        if not self.check_python_version():
-            return 1
-        
+        python_ok = self.check_python_version()
+        force_docker_only = False
+        if not python_ok:
+            force_docker_only = True
+            if args.dev:
+                self.logger.warning("--dev ignored: fallback to Docker-only mode")
+            if args.no_docker:
+                self.logger.warning("--no-docker ignored: Docker required due to Python version")
+            if not self.is_docker_available():
+                self.logger.error("Docker not available and Python version too old for console mode")
+                return 1
+
         # Step 2: Install dependencies if needed
-        if args.install_deps and not self.install_dependencies():
-            return 1
-        
+        if args.install_deps:
+            if force_docker_only:
+                self.logger.info("Skipping dependency installation (Docker-only mode)")
+            elif not self.install_dependencies():
+                return 1
+
         # Step 3: Load/create configuration
         config = self.load_config()
-        
+
         # Step 4: Create necessary directories
         self.create_directories(config)
-        
+
         # Step 5: Check API keys (warning only)
         self.check_api_keys(config)
-        
+
         # Step 6: Determine runtime mode
-        use_docker = False
-        if not args.dev:  # Only use Docker in production mode
-            # Check force flags
+        development_mode = args.dev and not force_docker_only
+        use_docker = force_docker_only
+
+        if force_docker_only:
+            # Ensure image exists / up to date
+            if args.force_rebuild:
+                self.logger.info("--force-rebuild specified: rebuilding Docker image")
+                if not self.build_docker_image(force=True):
+                    self.logger.error("Forced Docker build failed")
+                    return 1
+            elif self.needs_image_rebuild():
+                if not self.build_docker_image():
+                    self.logger.error("Failed to build Docker image in fallback mode")
+                    return 1
+        elif not development_mode:
             if args.no_docker:
                 self.logger.info("Docker disabled by --no-docker flag")
             elif args.docker:
                 if self.is_docker_available():
                     use_docker = True
                     self.logger.info("Docker forced by --docker flag")
-                    # Check and build image if needed
                     if args.force_rebuild:
                         self.logger.info("--force-rebuild specified: rebuilding image")
                         if not self.build_docker_image(force=True):
@@ -889,7 +912,6 @@ class GajaServerStarter:
                     self.logger.error("Docker forced but not available")
                     return 1
             else:
-                # Auto-detect Docker
                 if self.is_docker_available():
                     use_docker = True
                     self.logger.info("Docker available, checking image...")
@@ -908,14 +930,14 @@ class GajaServerStarter:
                     self.logger.info("Docker not available, using console mode")
         else:
             self.logger.info("Development mode: using console mode")
-        
+
         # Step 7: Print startup info
-        self.print_startup_info(config, use_docker, args.dev)
-        
+        self.print_startup_info(config, use_docker, development_mode)
+
         # Step 8: Start server
         try:
-            result = await self.start_server(config, development=args.dev, use_docker=use_docker)
-            if use_docker and not args.dev:
+            result = await self.start_server(config, development=development_mode, use_docker=use_docker)
+            if use_docker and not development_mode:
                 # For Docker mode, just return success if container started
                 return 0 if result else 1
             else:
