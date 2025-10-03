@@ -9,6 +9,33 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _resolve_config_path(config_file: str) -> Path:
+    """Resolve config path supporting env overrides and repo defaults."""
+
+    env_override = os.getenv("GAJA_CONFIG_PATH")
+    if env_override:
+        env_path = Path(env_override).expanduser()
+        if env_path.is_dir():
+            return env_path / config_file
+        return env_path
+
+    path = Path(config_file)
+    if path.exists() or path.is_absolute():
+        return path
+
+    package_dir = Path(__file__).resolve().parent
+    candidate = package_dir / config_file
+    if candidate.exists():
+        return candidate
+
+    root_candidate = package_dir.parent / config_file
+    if root_candidate.exists():
+        return root_candidate
+
+    # Default: create alongside config package to keep config scoped
+    return candidate
+
+
 def load_config(config_file: str = "server_config.json") -> dict[str, Any]:
     """Ładuje konfigurację z pliku JSON i nadpisuje wartości zmiennymi środowiskowymi.
 
@@ -18,11 +45,11 @@ def load_config(config_file: str = "server_config.json") -> dict[str, Any]:
     Returns:
         Dict z konfiguracją
     """
-    config_path = Path(config_file)
+    config_path = _resolve_config_path(config_file)
 
     # Jeśli plik nie istnieje, utwórz domyślną konfigurację
     if not config_path.exists():
-        logger.warning(f"Config file {config_file} not found, creating default")
+        logger.warning(f"Config file {config_path} not found, creating default")
         default_config = create_default_config()
         save_config(default_config, config_file)
         config = default_config
@@ -30,7 +57,7 @@ def load_config(config_file: str = "server_config.json") -> dict[str, Any]:
         try:
             with open(config_path, encoding="utf-8") as f:
                 config = json.load(f)
-            logger.info(f"Loaded configuration from {config_file}")
+            logger.info(f"Loaded configuration from {config_path}")
         except Exception as e:
             logger.error(f"Error loading config {config_file}: {e}")
             config = create_default_config()
@@ -46,10 +73,12 @@ def load_config(config_file: str = "server_config.json") -> dict[str, Any]:
 
 def save_config(config: dict[str, Any], config_file: str = "server_config.json"):
     """Zapisuje konfigurację do pliku."""
+    config_path = _resolve_config_path(config_file)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with open(config_file, "w", encoding="utf-8") as f:
+        with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
-        logger.info(f"Saved configuration to {config_file}")
+        logger.info(f"Saved configuration to {config_path}")
     except Exception as e:
         logger.error(f"Error saving config {config_file}: {e}")
 
@@ -80,6 +109,16 @@ def create_default_config() -> dict[str, Any]:
             "auto_load": True,
             "default_enabled": ["weather_module", "search_module"],
         },
+        "integrations": {
+            "telegram": {
+                "enabled": False,
+                "bot_token_env": "TELEGRAM_BOT_TOKEN",
+                "default_user_id": "1",
+                "allowed_chat_ids": [],
+                "chat_user_map": {},
+                "send_typing_action": True,
+            }
+        },
         "logging": {"level": "INFO", "file": "logs/server_{time:YYYY-MM-DD}.log"},
         "ui_language": "en",
     }
@@ -90,6 +129,7 @@ class ConfigLoader:
 
     def __init__(self, config_file: str = "server_config.json"):
         self.config_file = config_file
+        self.config_path = _resolve_config_path(config_file)
         self._config = None
         self.load()
 

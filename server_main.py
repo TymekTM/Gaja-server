@@ -89,6 +89,8 @@ from core.plugin_monitor import plugin_monitor
 from proactive_assistant_simple import get_proactive_assistant
 from core.websocket_manager import WebSocketMessage, connection_manager
 
+from integrations.telegram import TelegramBotService, load_telegram_config
+
 # Global server instance
 server_app = None
 
@@ -105,6 +107,7 @@ class ServerApp:
         self.proactive_assistant = None
         self.start_time = None
         self.connection_manager = connection_manager
+        self.telegram_service = None
 
     async def handle_websocket_message(self, user_id: str, message_data: dict) -> None:
         """Obsługuje wiadomości WebSocket."""
@@ -968,11 +971,27 @@ class ServerApp:
             self.proactive_assistant.start()
             logger.info("Proactive assistant started")
 
+            await self._initialize_telegram_integration()
+
             logger.success("Server initialization completed")
 
         except Exception as e:
             logger.error(f"Server initialization failed: {e}")
             raise
+
+    async def _initialize_telegram_integration(self) -> None:
+        try:
+            integrations_config = self.config.get("integrations", {}) if self.config else {}
+            telegram_config_raw = integrations_config.get("telegram", {})
+            config = load_telegram_config(telegram_config_raw)
+            if not config.enabled:
+                logger.info("Telegram integration disabled in configuration")
+                return
+
+            self.telegram_service = TelegramBotService(self, config)
+            await self.telegram_service.start()
+        except Exception as exc:
+            logger.error(f"Telegram integration failed to start: {exc}")
 
     async def load_all_user_plugins(self):
         """Load plugins for all users from database."""
@@ -1048,6 +1067,8 @@ class ServerApp:
                 self.proactive_assistant.stop()
             if self.plugin_monitor:
                 await self.plugin_monitor.stop_monitoring()
+            if self.telegram_service:
+                await self.telegram_service.stop()
             if self.db_manager and hasattr(self.db_manager, "close"):
                 try:
                     close_method = getattr(self.db_manager, "close")

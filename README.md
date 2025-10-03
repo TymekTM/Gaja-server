@@ -192,6 +192,13 @@ For Text-to-Speech functionality:
 Available voices: `Ash`, `Ballad`, `Coral`, `Sage`, `Verse` <br>
 Test on [OpenAI.fm](https://openai.fm)
 
+## Telegram Integration
+
+- Set `"integrations.telegram.enabled": true` in `server_config.json` to activate the bot bridge.
+- Provide the bot token via `TELEGRAM_BOT_TOKEN` (override the env key with `bot_token_env`).
+- Use `allowed_chat_ids` to restrict access and `chat_user_map` to map chat IDs to GAJA user IDs (fallback is `default_user_id`).
+- When enabled the bot mirrors the debug console: every Telegram text message is forwarded to the AI module and the textual response is sent back to the chat.
+
 ## Important Information
 
 ### AI Model Requirements

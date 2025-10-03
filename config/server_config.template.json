@@ -69,6 +69,16 @@
       "search_module"
     ]
   },
+  "integrations": {
+    "telegram": {
+      "enabled": false,
+      "bot_token_env": "TELEGRAM_BOT_TOKEN",
+      "default_user_id": "1",
+      "allowed_chat_ids": [],
+      "chat_user_map": {},
+      "send_typing_action": true
+    }
+  },
   "security": {
     "cors_origins": [
       "http://localhost:3000",

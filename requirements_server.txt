@@ -34,3 +34,4 @@ psutil>=5.9.0
 apscheduler>=3.10.4
 scrapling>=0.3.0
 duckduckgo-search>=5.3.0  # Optional: search library used by new search_module (falls back if unavailable)
+python-telegram-bot>=21.0  # Optional: Telegram integration
