@@ -76,7 +76,8 @@
       "default_user_id": "1",
       "allowed_chat_ids": [],
       "chat_user_map": {},
-      "send_typing_action": true
+      "send_typing_action": true,
+      "timetable_group": "1"
     }
   },
   "security": {
