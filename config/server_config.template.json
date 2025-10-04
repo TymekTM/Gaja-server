@@ -70,15 +70,27 @@
     ]
   },
   "integrations": {
-    "telegram": {
-      "enabled": false,
-      "bot_token_env": "TELEGRAM_BOT_TOKEN",
-      "default_user_id": "1",
-      "allowed_chat_ids": [],
-      "chat_user_map": {},
-      "send_typing_action": true,
-      "timetable_group": "1"
-    }
+        "telegram": {
+            "enabled": false,
+            "bot_token_env": "TELEGRAM_BOT_TOKEN",
+            "default_user_id": "1",
+            "allowed_chat_ids": [],
+            "chat_user_map": {},
+            "send_typing_action": true,
+            "timetable_group": "1",
+            "daily_brief": {
+                "enabled": false,
+                "time": "08:00",
+                "name": "",
+                "weather_location": "",
+                "include_schedule": true,
+                "include_fun": false,
+                "send_if_weekend": true,
+                "preferred_variant": 2,
+                "subject_overrides": [],
+                "storage_path": "user_data/telegram_daily_briefs.json"
+            }
+        }
   },
   "security": {
     "cors_origins": [
