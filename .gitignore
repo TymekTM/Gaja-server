@@ -35,6 +35,7 @@ MANIFEST
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
+logs/
 
 # Unit test / coverage reports
 htmlcov/
@@ -182,3 +183,4 @@ cython_debug/
 /user_data
 *.db
 /modules/Asystent_Server_data_fallback
+/config

@@ -2,7 +2,6 @@
 
 Goal: ensure each function declared in get_functions() executes (returns success True)
 with a minimally synthesized parameter set. Expands over the smoke test by:
- - Including api_module (now covered by dedicated integration test; here lightweight HEAD request)
  - For modules with multiple layers / wrapper classes (e.g. CoreModule class) we still use the
    module-level execute_function only (consistent interface expectation).
  - Capturing per-function failures distinctly for diagnosis.
@@ -45,12 +44,7 @@ BACKGROUND_OR_SKIP = {
     "plugin_monitor_module",
     "server_performance_monitor",
     "active_window_module",
-    "day_narrative_module",
-    "day_summary_module",
     "memory_module",
-    "proactive_assistant_module",
-    "routines_learner_module",
-    "user_behavior_module",
 }
 
 # Default minimal values

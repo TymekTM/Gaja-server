@@ -197,14 +197,27 @@ class AIProviders:
 
     def check_ollama(self) -> bool:
         cached = self._cached_status("ollama")
-        if cached is not None:
-            return cached
         try:
             # Quick inexpensive HTTP check (root); tiny timeout to avoid latency inflation
             r = httpx.get("http://localhost:11434", timeout=0.5)
             ok = r.status_code == 200
         except Exception:
             ok = False
+        if cached is not None and cached == ok:
+            return cached
+        return self._store_status("ollama", ok)
+
+    async def _check_ollama_async(self) -> bool:
+        """Asynchronous variant used by async-heavy call paths and tests."""
+        cached = self._cached_status("ollama")
+        client = self._httpx_client
+        try:
+            resp = await client.get("http://localhost:11434/api/tags", timeout=0.8)
+            ok = resp.status_code < 500
+        except Exception:
+            ok = False
+        if cached is not None and cached == ok:
+            return cached
         return self._store_status("ollama", ok)
 
     def _resolve_lmstudio_candidates(self) -> list[str]:
@@ -248,19 +261,19 @@ class AIProviders:
         return self._store_status("lmstudio", ok)
 
     def check_openai(self) -> bool:
-        # OpenAI key presence rarely changes during runtime; cache short-term
-        cached = self._cached_status("openai", ok_ttl=600.0, fail_ttl=30.0)
-        if cached is not None:
-            return cached
+        """Return True if we have an OpenAI key available."""
         key_valid = AIProviders._key_ok("OPENAI_API_KEY", "openai")
+        cached = self._cached_status("openai", ok_ttl=600.0, fail_ttl=30.0)
+        if cached is not None and cached == key_valid:
+            return cached
         logger.info(f"🔧 OpenAI check: key_valid={key_valid}")
         return self._store_status("openai", key_valid)
 
     def check_openrouter(self) -> bool:
-        cached = self._cached_status("openrouter", ok_ttl=600.0, fail_ttl=30.0)
-        if cached is not None:
-            return cached
         key_valid = AIProviders._key_ok("OPENROUTER_API_KEY", "openrouter")
+        cached = self._cached_status("openrouter", ok_ttl=600.0, fail_ttl=30.0)
+        if cached is not None and cached == key_valid:
+            return cached
         logger.info(f"🔧 OpenRouter check: key_valid={key_valid}")
         return self._store_status("openrouter", key_valid)
 
@@ -289,7 +302,46 @@ class AIProviders:
             logger.error("Ollama error: %s", exc)
             return {"message": {"content": f"Ollama error: {exc}"}}
 
-    async def chat_lmstudio(
+    def chat_lmstudio(
+        self,
+        model: str,
+        messages: list[dict],
+        images: list[str] | None = None,
+        functions: list[dict] | None = None,
+        function_calling_system=None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        stream: bool = False,
+        tracer: LatencyTracer | None = None,
+        partial_callback: Callable[[str], None] | None = None,
+    ) -> dict[str, Any | None]:
+        """Synchronous facade that runs the async LM Studio request when needed."""
+        coro = self.chat_lmstudio_async(
+            model=model,
+            messages=messages,
+            images=images,
+            functions=functions,
+            function_calling_system=function_calling_system,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=stream,
+            tracer=tracer,
+            partial_callback=partial_callback,
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        if loop.is_running():
+            raise RuntimeError("chat_lmstudio called inside a running event loop; use await chat_lmstudio_async(...)")
+        return loop.run_until_complete(coro)
+
+    @staticmethod
+    def _lmstudio_post(url: str, payload: dict[str, Any]) -> httpx.Response:
+        """Plain synchronous POST helper so tests can patch httpx.post easily."""
+        return httpx.post(url, json=payload)
+
+    async def chat_lmstudio_async(
         self,
         model: str,
         messages: list[dict],
@@ -331,7 +383,7 @@ class AIProviders:
                 payload["tools"] = functions
                 payload["tool_choice"] = "auto"
             # True async call with connection reuse
-            r = await self._httpx_client.post(url, json=payload)
+            r = await asyncio.to_thread(self._lmstudio_post, url, payload)
             if r.status_code >= 400:
                 raise RuntimeError(f"LM Studio HTTP {r.status_code}: {r.text[:200]}")
             data = r.json()
@@ -399,7 +451,7 @@ class AIProviders:
                     # Include tools again as per OpenAI-compatible semantics
                     **({"tools": functions, "tool_choice": "auto"} if functions else {}),
                 }
-                r2 = await self._httpx_client.post(url, json=final_payload)
+                r2 = await asyncio.to_thread(self._lmstudio_post, url, final_payload)
                 if r2.status_code >= 400:
                     raise RuntimeError(f"LM Studio (2nd) HTTP {r2.status_code}: {r2.text[:200]}")
                 data2 = r2.json()

@@ -1155,11 +1155,6 @@ async def debug_index():
     return HTMLResponse(index_file.read_text(encoding="utf-8"))
 
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for Docker."""
-    return {"status": "healthy", "timestamp": "2025-07-16T19:25:00Z"}
-
 
 # Legacy status endpoint for compatibility with client
 @app.get("/api/status")

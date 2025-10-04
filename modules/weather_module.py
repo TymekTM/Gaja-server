@@ -2,10 +2,10 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
+import httpx
+
 from config.config_manager import get_database_manager
 from core.base_module import BaseModule, FunctionSchema, TestModeSupport, create_standard_function_schema
-
-from .api_module import get_api_module
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +14,6 @@ class WeatherModule(BaseModule, TestModeSupport):
     """Moduł pogodowy dla asystenta."""
 
     # Type hints for attributes to satisfy static analysis
-    api_module: Any
     db_manager: Any
     weather_providers: Dict[str, Any]
     weather_cache: Dict[str, Any]
@@ -22,7 +21,6 @@ class WeatherModule(BaseModule, TestModeSupport):
 
     def __init__(self):
         super().__init__("weather")
-        self.api_module = None
         self.db_manager = get_database_manager()
         self.weather_providers = {
             "weatherapi": self._get_weatherapi_data,
@@ -38,7 +36,6 @@ class WeatherModule(BaseModule, TestModeSupport):
 
     async def _initialize_impl(self):
         """Inicjalizuje moduł pogodowy."""
-        self.api_module = await get_api_module()
         self.logger.info("WeatherModule initialized")
 
     def get_function_schemas(self) -> List[FunctionSchema]:
@@ -271,9 +268,6 @@ class WeatherModule(BaseModule, TestModeSupport):
         Returns:
             Dane pogodowe
         """
-        if not self.api_module:
-            await self.initialize()
-
         # Sprawdź cache
         cache_key = f"{provider}_{location.lower()}"
         if cache_key in self.weather_cache:
@@ -324,9 +318,6 @@ class WeatherModule(BaseModule, TestModeSupport):
         Returns:
             Prognoza pogody
         """
-        if not self.api_module:
-            await self.initialize()
-
         # Sprawdź cache
         cache_key = f"forecast_{location.lower()}_{days}"
         if cache_key in self.weather_cache:
@@ -445,100 +436,85 @@ class WeatherModule(BaseModule, TestModeSupport):
         self, user_id: str, location: str, api_key: str
     ) -> Dict[str, Any]:
         """Pobiera dane z WeatherAPI."""
-        if not self.api_module:
-            await self.initialize()
-            
-        url = f"http://api.weatherapi.com/v1/current.json"
+        url = "https://api.weatherapi.com/v1/current.json"
         params = {
             "key": api_key,
             "q": location,
-            "lang": "pl"
+            "lang": "pl",
         }
 
-        # Convert user_id to int for API module
-        user_id_int = int(user_id) if isinstance(user_id, str) else user_id
-        response = await self.api_module.make_request(
-            user_id=user_id_int,
-            method="GET",
-            url=url,
-            params=params
-        )
-        
-        if response.get("status") == 200 and "data" in response:
-            data = response["data"]
-            current = data["current"]
-            location_data = data["location"]
-            
-            return {
-                "location": f"{location_data['name']}, {location_data['country']}",
-                "temperature": current["temp_c"],
-                "feels_like": current["feelslike_c"],
-                "humidity": current["humidity"],
-                "pressure": current["pressure_mb"],
-                "description": current["condition"]["text"],
-                "wind_speed": current["wind_kph"] / 3.6,  # Convert to m/s
-                "wind_direction": current["wind_dir"],
-                "visibility": current["vis_km"],
-                "uv_index": current["uv"],
-                # WeatherAPI current does not give direct precip probability, approximate via cloud + condition
-                "precipitation_chance": None,
-                "cloud_cover": current.get("cloud"),
-                "timestamp": datetime.now().isoformat(),
-            }
-        else:
-            raise Exception(f"WeatherAPI error: {response.get('error', 'Unknown error')}")
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPError as exc:
+            status = exc.response.status_code if exc.response else "n/a"
+            raise Exception(f"WeatherAPI error (status {status}): {exc}") from exc
+
+        current = data.get("current") or {}
+        location_data = data.get("location") or {}
+
+        return {
+            "location": f"{location_data.get('name', '')}, {location_data.get('country', '')}",
+            "temperature": current.get("temp_c"),
+            "feels_like": current.get("feelslike_c"),
+            "humidity": current.get("humidity"),
+            "pressure": current.get("pressure_mb"),
+            "description": (current.get("condition") or {}).get("text"),
+            "wind_speed": (current.get("wind_kph") or 0) / 3.6 if current.get("wind_kph") is not None else None,
+            "wind_direction": current.get("wind_dir"),
+            "visibility": current.get("vis_km"),
+            "uv_index": current.get("uv"),
+            "precipitation_chance": None,
+            "cloud_cover": current.get("cloud"),
+            "timestamp": datetime.now().isoformat(),
+        }
 
     async def _get_weatherapi_forecast(
         self, user_id: str, location: str, api_key: str, days: int
     ) -> Dict[str, Any]:
         """Pobiera prognozę z WeatherAPI."""
-        if not self.api_module:
-            await self.initialize()
-            
-        url = f"http://api.weatherapi.com/v1/forecast.json"
+        url = "https://api.weatherapi.com/v1/forecast.json"
         params = {
             "key": api_key,
             "q": location,
             "days": days,
-            "lang": "pl"
+            "lang": "pl",
         }
 
-        # Convert user_id to int for API module
-        user_id_int = int(user_id) if isinstance(user_id, str) else user_id
-        response = await self.api_module.make_request(
-            user_id=user_id_int,
-            method="GET",
-            url=url,
-            params=params
-        )
-        
-        if response.get("status") == 200 and "data" in response:
-            data = response["data"]
-            location_data = data["location"]
-            forecast_days = []
-            
-            for day in data["forecast"]["forecastday"]:
-                day_data = day["day"]
-                forecast_days.append({
-                    "date": day["date"],
-                    "temperature_max": day_data["maxtemp_c"],
-                    "temperature_min": day_data["mintemp_c"],
-                    "description": day_data["condition"]["text"],
-                    "humidity": day_data["avghumidity"],
-                    "wind_speed": day_data["maxwind_kph"] / 3.6,  # Convert to m/s
-                    # Pola dla heurystyki opadów
-                    "daily_chance_of_rain": day_data.get("daily_chance_of_rain"),
-                    "daily_chance_of_snow": day_data.get("daily_chance_of_snow"),
-                })
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPError as exc:
+            status = exc.response.status_code if exc.response else "n/a"
+            raise Exception(f"WeatherAPI forecast error (status {status}): {exc}") from exc
 
-            return {
-                "location": f"{location_data['name']}, {location_data['country']}",
-                "days": days,
-                "forecast": forecast_days,
-                "timestamp": datetime.now().isoformat(),
-            }
-        else:
-            raise Exception(f"WeatherAPI forecast error: {response.get('error', 'Unknown error')}")
+        location_data = data.get("location", {})
+        forecast_days = []
+
+        forecast = (data.get("forecast") or {}).get("forecastday") or []
+        for day in forecast:
+            day_data = day.get("day", {})
+            forecast_days.append({
+                "date": day.get("date"),
+                "temperature_max": day_data.get("maxtemp_c"),
+                "temperature_min": day_data.get("mintemp_c"),
+                "description": (day_data.get("condition") or {}).get("text"),
+                "humidity": day_data.get("avghumidity"),
+                "wind_speed": (day_data.get("maxwind_kph") or 0) / 3.6 if day_data.get("maxwind_kph") is not None else None,
+                "daily_chance_of_rain": day_data.get("daily_chance_of_rain"),
+                "daily_chance_of_snow": day_data.get("daily_chance_of_snow"),
+            })
+
+        return {
+            "location": f"{location_data.get('name', '')}, {location_data.get('country', '')}",
+            "days": days,
+            "forecast": forecast_days,
+            "timestamp": datetime.now().isoformat(),
+        }
 
     def _wind_direction_from_degrees(self, degrees: float) -> str:
         """Konwertuje stopnie na kierunek wiatru."""

@@ -393,7 +393,7 @@ class TestRealPluginFunctionality:
     @pytest.mark.integration
     async def test_real_weather_module_functions(self):
         try:
-            module = importlib.import_module("modules.weather_module_refactored")
+            module = importlib.import_module("modules.weather_module")
             functions = [name for name, obj in inspect.getmembers(module) if inspect.isfunction(obj)]
             assert functions, "Weather module has no functions"
             if hasattr(module, "get_functions"):
@@ -429,9 +429,8 @@ class TestRealPluginFunctionality:
     @pytest.mark.integration
     async def test_real_module_discovery(self):
         module_paths = [
-            "modules.weather_module_refactored",
+            "modules.weather_module",
             "modules.search_module",
-            "modules.vector_memory_module",
             "modules.core_module",
             "modules.shopping_list_module",
             "modules.notes_module",

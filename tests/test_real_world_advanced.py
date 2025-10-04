@@ -497,7 +497,7 @@ class TestLoadedPluginsFunctionality:
     async def test_weather_module_availability(self):
         """Test weather module is loaded and functional."""
         try:
-            module = importlib.import_module("modules.weather_module_refactored")
+            module = importlib.import_module("modules.weather_module")
             
             # Check for expected functions
             expected_functions = ["execute_function", "get_functions", "create_standard_function_schema"]
@@ -536,27 +536,6 @@ class TestLoadedPluginsFunctionality:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
-    async def test_vector_memory_module_availability(self):
-        """Test vector memory module is loaded and functional."""
-        try:
-            module = importlib.import_module("modules.vector_memory_module")
-            
-            # Check for expected functions
-            expected_functions = ["get_functions", "cosine_similarity", "get_database_manager"]
-            available_functions = [func for func in expected_functions if hasattr(module, func)]
-            
-            assert len(available_functions) > 0, "No vector memory functions found"
-            
-            # Test function signature if available
-            if available_functions:
-                func = getattr(module, available_functions[0])
-                assert callable(func), f"Vector memory function {available_functions[0]} not callable"
-                
-        except ImportError:
-            pytest.skip("Vector memory module not available")
-
-    @pytest.mark.asyncio
-    @pytest.mark.integration
     async def test_core_module_availability(self):
         """Test core module is loaded and functional."""
         try:
@@ -581,9 +560,8 @@ class TestLoadedPluginsFunctionality:
     async def test_basic_module_discovery(self):
         """Test discovery of all available modules."""
         module_paths = [
-            "modules.weather_module_refactored", 
+            "modules.weather_module",
             "modules.search_module",
-            "modules.vector_memory_module",
             "modules.core_module",
             "modules.shopping_list_module",
             "modules.notes_module", 
@@ -656,7 +634,7 @@ class TestRealWorldIntegrationMetrics:
             # Test conversation scenarios with performance requirements
             test_cases = [
                 {
-                    "module": "modules.weather_module_refactored",
+                    "module": "modules.weather_module",
                     "query": "Jaka będzie pogoda jutro?",
                     "expected_keywords": ["pogoda", "jutro"],
                     "max_latency": 2.0

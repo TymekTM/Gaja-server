@@ -6,6 +6,7 @@ Provides data for web administration endpoints.
 import os
 import json
 import time
+from pathlib import Path
 import psutil
 from datetime import datetime
 from typing import Optional, Any, Dict
@@ -61,8 +62,8 @@ class ExtendedWebUI:
                 config_data = self.config_loader.get_config()
             else:
                 # Fallback: try to read config file directly
-                config_path = 'server_config.json'
-                if os.path.exists(config_path):
+                config_path = Path(__file__).parent / "config" / "server_config.json"
+                if config_path.exists():
                     with open(config_path, 'r', encoding='utf-8') as f:
                         config_data = json.load(f)
                         

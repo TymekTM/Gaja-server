@@ -3,7 +3,7 @@
 This module dynamically injects lightweight stub modules into sys.modules
 so that older tests importing flat module names (e.g. performance_monitor,
 plugin_monitor, environment_manager, prompt_builder, prompts, websocket_manager,
-advanced_memory_system, plugin_protocol) do not fail with ImportError.
+plugin_protocol) do not fail with ImportError.
 
 Each shim exposes only the minimal surface required by the tests:
 - Classes with expected names & trivial attributes/methods.
@@ -111,15 +111,6 @@ def _build_websocket_manager(mod):
     mod.WebSocketManager = WebSocketManager
 
 
-def _build_advanced_memory_system(mod):
-    class AdvancedMemorySystem:
-        def __init__(self):
-            self.store = {}
-        def add(self, key, value):
-            self.store[key] = value
-        def get(self, key):
-            return self.store.get(key)
-    mod.AdvancedMemorySystem = AdvancedMemorySystem
 
 
 def _build_config_loader(mod):
@@ -240,7 +231,6 @@ def install_all():
     _ensure('prompt_builder', _build_prompt_builder)
     _ensure('prompts', _build_prompts)
     _ensure('websocket_manager', _build_websocket_manager)
-    _ensure('advanced_memory_system', _build_advanced_memory_system)
     # Prefer real config.config_loader if available; only create shim when import fails
     real_config_loader_available = False
     use_real = False

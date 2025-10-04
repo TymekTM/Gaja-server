@@ -106,10 +106,7 @@ class FunctionCallingSystem:
             ("search", "search_module"),
             ("core", "core_module"),
             ("music", "music_module"),
-            ("api", "api_module"),
             ("web", "open_web_module"),
-            ("v_memory", "vector_memory_module"),
-            ("memory", "memory_module"),
             ("notes", "notes_module"),
             ("tasks", "tasks_module"),
         ]
@@ -156,10 +153,7 @@ class FunctionCallingSystem:
                             "SearchModule",
                             "CoreModule",
                             "MusicModule",
-                            "APIModule",
                             "WebModule",
-                            "VectorMemoryModule",
-                            "MemoryModule",
                             "NotesModule",
                             "TasksModule",
                         ]:

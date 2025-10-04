@@ -1,4 +1,4 @@
-"""Test wszystkich skipped modułów onboarding i advanced_memory_system.
+"""Test wszystkich skipped modułów onboarding.
 
 Sprawdza czy moduły onboarding mają standardowy interfejs i czy można je testować.
 Dodaje dedykowane testy dla zaawansowanych modułów nie pokrytych przez podstawowe testy.
@@ -92,65 +92,6 @@ async def test_onboarding_plugin_module_functions():
     plugin_funcs = {f["name"] for f in mod.get_functions()}
     
     assert onboarding_funcs == plugin_funcs, "Both onboarding modules should expose same functions"
-
-@pytest.mark.asyncio
-async def test_advanced_memory_system_module():
-    """Test advanced_memory_system module if it has standard interface."""
-    path = MODULES_DIR / "advanced_memory_system.py"
-    if not path.exists():
-        pytest.skip("advanced_memory_system.py not found")
-        
-    try:
-        mod = _load_module(path)
-    except Exception as e:
-        pytest.skip(f"advanced_memory_system module has loading issues: {e}")
-        
-    if not hasattr(mod, "get_functions"):
-        pytest.skip("advanced_memory_system doesn't have get_functions")
-        
-    if not hasattr(mod, "execute_function"):
-        pytest.skip("advanced_memory_system doesn't have execute_function")
-        
-    try:
-        funcs = mod.get_functions()
-        assert isinstance(funcs, list), "get_functions should return list"
-    except Exception as e:
-        pytest.skip(f"get_functions failed: {e}")
-        
-    # If it has functions, test them
-    if funcs:
-        for func_desc in funcs[:2]:  # Test first 2 functions max
-            fname = func_desc.get("name")
-            if not fname:
-                continue
-                
-            # Build minimal parameters
-            schema = func_desc.get("parameters", {})
-            props = schema.get("properties", {})
-            required = schema.get("required", [])
-            
-            params = {}
-            for param in required[:3]:  # Only required params, max 3
-                if param in props:
-                    param_type = props[param].get("type", "string")
-                    if param_type == "string":
-                        params[param] = "test"
-                    elif param_type == "integer":
-                        params[param] = 1
-                    elif param_type == "boolean":
-                        params[param] = True
-                        
-            # Set test_mode if available
-            if "test_mode" in props:
-                params["test_mode"] = True
-                
-            try:
-                result = await mod.execute_function(fname, params, USER_ID)
-                assert isinstance(result, dict), f"Function {fname} should return dict"
-                # Don't assert success=True as advanced modules might have complex requirements
-            except Exception as e:
-                # Log but don't fail - advanced modules might need special setup
-                print(f"Warning: {fname} failed with {e}")
 
 @pytest.mark.asyncio
 async def test_daily_briefing_module():

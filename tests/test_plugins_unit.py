@@ -31,14 +31,7 @@ SKIP_MODULES = {
     "server_performance_monitor",  # monitoring systemowy
     # Moduły, które nie expose'ują interfejsu get_functions/execute_function (helpery / procesy w tle)
     "active_window_module",
-    "day_narrative_module",
-    "day_summary_module",
     "memory_module",
-    "proactive_assistant_module",
-    "routines_learner_module",
-    "user_behavior_module",
-    # Tymczasowo pomijamy api_module – wymaga poprawnego user_id w DB (FOREIGN KEY). Dodamy osobny test integracyjny.
-    "api_module",
 }
 
 # Domyślne wartości dla wymaganych pól parametrów

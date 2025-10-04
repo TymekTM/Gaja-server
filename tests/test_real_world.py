@@ -54,49 +54,6 @@ def _load_module(path: Path):
 @pytest.mark.slow
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_api_module_real_http_calls():
-    """Test api_module z prawdziwymi połączeniami HTTP."""
-    _ensure_user(USER_ID)
-    path = MODULES_DIR / "api_module.py"
-    mod = _load_module(path)
-    
-    # Test GET request to real endpoint
-    result = await mod.execute_function(
-        "make_api_request",
-        {
-            "method": "GET",
-            "url": "https://httpbin.org/get",
-            "headers": {"User-Agent": "GAJA-Test"},
-            "params": {"test": "true"}
-        },
-        USER_ID
-    )
-    
-    assert result.get("success") is True, "Real HTTP GET should succeed"
-    data = result.get("data", {})
-    assert data.get("status") == 200, "Should get 200 status"
-    assert "headers" in data, "Should have headers"
-    assert "json" in str(data), "httpbin should return JSON"
-    
-    # Test POST request to real endpoint
-    result = await mod.execute_function(
-        "make_api_request",
-        {
-            "method": "POST",
-            "url": "https://httpbin.org/post",
-            "headers": {"Content-Type": "application/json"},
-            "json_data": {"test_data": "hello world"}
-        },
-        USER_ID
-    )
-    
-    assert result.get("success") is True, "Real HTTP POST should succeed"
-    data = result.get("data", {})
-    assert data.get("status") == 200, "Should get 200 status"
-
-@pytest.mark.slow
-@pytest.mark.integration
-@pytest.mark.asyncio
 async def test_search_module_real_searches():
     """Test search_module z prawdziwymi wyszukiwaniami."""
     _ensure_user(USER_ID)
@@ -340,56 +297,6 @@ async def test_music_module_capabilities():
     status = result.get("status", {})
     assert "is_playing" in status, "Should have playing status"
     assert "track" in status, "Should have track info"
-
-@pytest.mark.slow
-@pytest.mark.integration
-@pytest.mark.asyncio  
-async def test_database_operations_persistence():
-    """Test prawdziwych operacji na bazie danych."""
-    _ensure_user(USER_ID)
-    
-    # Test if database exists and is writable
-    if not DB_PATH.exists():
-        pytest.skip("Database not available for testing")
-    
-    # Test api_module database logging
-    path = MODULES_DIR / "api_module.py"
-    mod = _load_module(path)
-    
-    # Make a safe HTTP request that will be logged
-    initial_count = 0
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.execute("SELECT COUNT(*) FROM api_usage WHERE user_id = ?", (USER_ID,))
-        initial_count = cur.fetchone()[0]
-        conn.close()
-    except:
-        pass  # Table might not exist yet
-    
-    # Make API request
-    result = await mod.execute_function(
-        "make_api_request",
-        {
-            "method": "GET",
-            "url": "https://httpbin.org/status/200",
-            "headers": {},
-            "params": {}
-        },
-        USER_ID
-    )
-    
-    assert result.get("success") is True, "API request should succeed"
-    
-    # Check if it was logged in database
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.execute("SELECT COUNT(*) FROM api_usage WHERE user_id = ?", (USER_ID,))
-        final_count = cur.fetchone()[0]
-        conn.close()
-        
-        assert final_count > initial_count, "API usage should be logged in database"
-    except Exception as e:
-        pytest.skip(f"Database check failed: {e}")
 
 @pytest.mark.slow
 @pytest.mark.asyncio

@@ -476,10 +476,8 @@ async def test_token(payload: dict[str,str]) -> dict[str, Any]:
     email = (payload.get("email") or "").lower().strip()
     if not email:
         raise HTTPException(status_code=400, detail="Email required")
-    user = SECURE_USERS.get(email)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    token_data = {"userId": user["id"], "email": user["email"], "role": user["role"]}
+    role = payload.get("role", "user")
+    token_data = {"sub": email, "email": email, "role": role}
     token = security_manager.create_access_token(token_data)
     return {"token": token}
 
@@ -502,55 +500,6 @@ class IntegrationInfo(BaseModel):
     config: dict[str, Any] | None = None
 
 
-# Bezpieczni użytkownicy - hasła są zahashowane
-# Przykładowi użytkownicy z zahashowanymi hasłami
-# UWAGA: W produkcji należy używać zewnętrznej bazy danych z właściwą migracją
-SECURE_USERS = {
-    "admin@gaja.app": {
-        "id": "1",
-        "email": "admin@gaja.app",
-        "role": "admin",
-        "password_hash": "$2b$12$t6nolZ034TLQOVDlCrozTuFDjkPyRXJIrD6KcLBBkYZNXqlnTjRpC",
-        "is_active": True,
-        "created_at": datetime.now().isoformat(),
-        "settings": {
-            "language": "en",
-            "voice": "default",
-            "wakeWord": True,
-            "privacy": {"shareAnalytics": True, "storeConversations": True},
-        },
-    },
-    "test@example.com": {
-        "id": "1",
-        "email": "test@example.com",
-        "role": "user", 
-        "password_hash": "$2b$12$test.hash.for.testing.purposes",
-        "is_active": True,
-        "created_at": datetime.now().isoformat(),
-        "settings": {
-            "language": "en",
-            "voice": "default", 
-            "wakeWord": True,
-            "privacy": {"shareAnalytics": False, "storeConversations": True},
-        },
-    },
-    "demo@mail.com": {
-        "id": "2",
-        "email": "demo@mail.com",
-        "role": "user",
-        "password_hash": "$2b$12$Tg.YnWlT4wbt3QnvYI1KCeal.5M0TowXoeAXTHr7ad1ULLabzJhWe",
-        "is_active": True,
-        "created_at": datetime.now().isoformat(),
-        "settings": {
-            "language": "pl",
-            "voice": "default",
-            "wakeWord": True,
-            "privacy": {"shareAnalytics": False, "storeConversations": True},
-        },
-    },
-}
-
-
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> dict[str, Any]:
@@ -558,38 +507,31 @@ def get_current_user(
     try:
         if not credentials:
             raise HTTPException(status_code=401, detail="Authorization header missing")
-            
-        token = credentials.credentials
 
-        # Weryfikuj token używając SecurityManager
+        token = credentials.credentials
         payload = security_manager.verify_token(token, "access")
 
-        # Pobierz użytkownika na podstawie ID/email z tokenu
-        user_email = payload.get("email") or payload.get("sub")
-        user_id = payload.get("userId") or payload.get("user_id")
+        user_email = payload.get("email") or payload.get("sub") or "user@gaja.app"
+        user_id = payload.get("userId") or payload.get("user_id") or payload.get("sub") or "1"
+        role = payload.get("role", "user")
 
-        # Znajdź użytkownika w systemie
-        user = None
-        for _, user_data in SECURE_USERS.items():
-            if (user_data["email"] == user_email or 
-                str(user_data["id"]) == str(user_id)):
-                user = user_data
-                break
+        settings = USER_SETTINGS_STORE.setdefault(
+            user_email, DEFAULT_USER_SETTINGS.copy()
+        )
 
-        if not user:
-            logger.warning(f"User not found for email {user_email} or ID {user_id}")
-            raise HTTPException(status_code=401, detail="User not found")
-
-        if not user.get("is_active", True):
-            raise HTTPException(status_code=401, detail="Account deactivated")
-
-        return user
+        return {
+            "id": str(user_id),
+            "email": user_email,
+            "role": role,
+            "is_active": True,
+            "settings": settings,
+        }
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Token validation error: {e}")
-        raise HTTPException(status_code=401, detail="Invalid authentication") from e
+    except Exception as exc:
+        logger.error(f"Token validation error: {exc}")
+        raise HTTPException(status_code=401, detail="Invalid authentication") from exc
 
 
 def optional_auth(
@@ -607,6 +549,19 @@ def optional_auth(
 # Auth endpoints
 REFRESH_TOKENS: dict[str, dict[str, Any]] = {}
 
+DEFAULT_USER_SETTINGS: dict[str, Any] = {
+    "language": "pl",
+    "voice": "default",
+    "wakeWord": True,
+    "privacy": {
+        "shareAnalytics": False,
+        "storeConversations": True,
+    },
+}
+
+USER_SETTINGS_STORE: dict[str, dict[str, Any]] = {}
+
+
 
 @router.post("/auth/login")
 async def login(request: LoginRequest, fastapi_request: Request) -> dict[str, Any]:
@@ -616,110 +571,83 @@ async def login(request: LoginRequest, fastapi_request: Request) -> dict[str, An
         password = request.password
 
         test_mode = os.getenv("GAJA_TEST_MODE") in {"1", "true", "True"}
-        # Lockout bypass in test mode to allow repeated CI runs
-        if not test_mode:
-            if security_manager.is_account_locked(email):
-                logger.warning(f"Login attempt on locked account: {email}")
-                raise HTTPException(
-                    status_code=429,
-                    detail="Account temporarily locked due to too many failed attempts",
-                )
-        else:
-            # Always clear failed attempts in test mode to avoid sticky lock state
-            security_manager.clear_failed_attempts(email)
+        username = email
 
-        # Znajdź użytkownika (create test user dynamically in test mode if missing)
-        user = SECURE_USERS.get(email)
-        if test_mode and email == "demo@mail.com" and not user:
-            # Create ephemeral demo user with simple password bypass (not hashed) for CI
-            user = {
-                "id": "2",
-                "email": email,
-                "role": "user",
-                "password_hash": SECURE_USERS.get("demo@mail.com", {}).get("password_hash", ""),
-                "is_active": True,
-                "created_at": datetime.now().isoformat(),
-                "settings": {"language": "pl", "voice": "default", "wakeWord": True, "privacy": {"shareAnalytics": False, "storeConversations": True}},
+        if not test_mode and security_manager.is_account_locked(username):
+            lock_info = security_manager.failed_attempts[username]
+            return {
+                "success": False,
+                "error": "Account is temporarily locked",
+                "locked_until": lock_info.get("locked_until"),
             }
-            SECURE_USERS[email] = user
-        if not user:
-            security_manager.record_failed_attempt(email)
-            logger.warning(f"Login attempt with non-existent email: {email}")
-            raise HTTPException(status_code=401, detail="Invalid credentials")
 
-        # Sprawdź czy konto jest aktywne
-        if not user.get("is_active", True):
-            logger.warning(f"Login attempt on deactivated account: {email}")
-            raise HTTPException(status_code=401, detail="Account deactivated")
+        auth_result = security_manager.authenticate_user(username, password)
 
-        # Weryfikuj hasło (skip in test mode to simplify CI setup)
-        if not test_mode:
-            if not security_manager.verify_password(password, user["password_hash"]):
-                security_manager.record_failed_attempt(email)
-                logger.warning(f"Failed login attempt for user: {email}")
-                raise HTTPException(status_code=401, detail="Invalid credentials")
-        else:
-            # Accept any password for demo & admin users in test mode to avoid bcrypt dependency in CI
-            if email in {"demo@mail.com", "admin@gaja.app"}:
-                logger.debug("Test mode: bypass password for test user")
-            elif not security_manager.verify_password(password, user["password_hash"]):
-                security_manager.record_failed_attempt(email)
-                raise HTTPException(status_code=401, detail="Invalid credentials (test mode)")
+        if not auth_result.get("success") and test_mode:
+            created = security_manager.create_user(username, password or "demo_pass")
+            if created:
+                auth_result = security_manager.authenticate_user(username, password or "demo_pass")
 
-        # Udane logowanie - wyczyść nieudane próby
-        security_manager.clear_failed_attempts(email)
+        if not auth_result.get("success"):
+            security_manager.record_failed_attempt(username)
+            logger.warning(f"Failed login attempt for user: {email}")
+            raise HTTPException(status_code=401, detail=auth_result.get("error", "Invalid credentials"))
 
-        # Utwórz tokeny
-        token_data = {
-            "userId": user["id"],
-            "email": user["email"],
-            "role": user["role"],
+        security_manager.clear_failed_attempts(username)
+
+        role = auth_result.get("user", {}).get("role", "user")
+        payload = {
+            "sub": username,
+            "email": email,
+            "role": role,
         }
-        access_token = security_manager.create_access_token(token_data)
-        refresh_token = security_manager.create_refresh_token(token_data)
+        access_token = security_manager.create_access_token(payload)
+        refresh_token = security_manager.create_refresh_token(payload)
 
-        # Store refresh token (simple in-memory store; replace with DB in production)
         REFRESH_TOKENS[refresh_token] = {
-            "user_id": user["id"],
-            "email": user["email"],
-            "role": user["role"],
+            "user_id": username,
+            "email": email,
+            "role": role,
             "created_at": datetime.now().isoformat(),
         }
 
-        # Loguj udane logowanie (bez wrażliwych danych)
         client_ip = fastapi_request.client.host if fastapi_request and fastapi_request.client else "unknown"
         log_data = security_manager.sanitize_log_data(
             {
                 "email": email,
-                "user_id": user["id"],
-                "role": user["role"],
+                "user_id": username,
+                "role": role,
                 "ip": client_ip,
             }
         )
         logger.info(f"Successful login: {log_data}")
 
-        # Return explicit dict to avoid any potential serialization issues omitting refreshToken
+        settings_store = USER_SETTINGS_STORE.setdefault(
+            email, DEFAULT_USER_SETTINGS.copy()
+        )
+
+        user_payload = {
+            "id": username,
+            "email": email,
+            "role": role,
+            "settings": settings_store,
+            "createdAt": datetime.now().isoformat(),
+        }
+
         return {
             "success": True,
             "token": access_token,
             "refreshToken": refresh_token,
-            "user": {
-                "id": user["id"],
-                "email": user["email"],
-                "role": user["role"],
-                "settings": user["settings"],
-                "createdAt": user["created_at"],
-            },
+            "user": user_payload,
         }
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Login error: {e}")
+    except Exception as exc:
+        logger.error(f"Login error: {exc}")
         raise HTTPException(
             status_code=500, detail="Authentication service unavailable"
-        ) from e
-
+        ) from exc
 
 @router.post("/auth/magic-link")
 async def magic_link(request: dict[str, str]) -> ApiResponse:
@@ -778,13 +706,12 @@ async def update_settings(
     try:
         user_email = current_user["email"]
 
-        # Waliduj że użytkownik istnieje
-        if user_email not in SECURE_USERS:
-            raise HTTPException(status_code=404, detail="User not found")
+        store = USER_SETTINGS_STORE.setdefault(
+            user_email, DEFAULT_USER_SETTINGS.copy()
+        )
 
-        # Zaktualizuj ustawienia (tylko niepuste wartości)
         settings_update = settings.dict(exclude_unset=True)
-        SECURE_USERS[user_email]["settings"].update(settings_update)
+        store.update(settings_update)
 
         # Loguj zmianę ustawień
         log_data = security_manager.sanitize_log_data(
@@ -800,8 +727,8 @@ async def update_settings(
             id=current_user["id"],
             email=current_user["email"],
             role=current_user["role"],
-            settings=UserSettings(**SECURE_USERS[user_email]["settings"]),
-            createdAt=current_user["created_at"],
+            settings=UserSettings(**store),
+            createdAt=datetime.now().isoformat(),
         )
 
     except HTTPException:
@@ -1819,21 +1746,18 @@ async def admin_list_users(current_user: dict[str, Any] = Depends(get_current_us
                 })
         except Exception as e:
             logger.error(f"Error listing users: {e}")
-    # Fallback: SECURE_USERS (ensure admin/test accounts visible even if not in DB yet)
-    try:
-        for email, su in SECURE_USERS.items():
-            uid = str(su.get("id"))
-            if uid not in seen_ids:
-                users.append({
-                    "id": uid,
-                    "username": su.get("email", f"user_{uid}"),
-                    "settings": su.get("settings", {}),
-                    "enabled_plugins": [],
-                    "source": "secure"
-                })
-                seen_ids.add(uid)
-    except Exception as e:
-        logger.debug(f"Merging SECURE_USERS failed: {e}")
+    # Fallback: in-memory settings store (for test/demo accounts)
+    for email, settings in USER_SETTINGS_STORE.items():
+        uid = email
+        if uid not in seen_ids:
+            users.append({
+                "id": uid,
+                "username": email,
+                "settings": settings,
+                "enabled_plugins": [],
+                "source": "local",
+            })
+            seen_ids.add(uid)
     # Include active websocket connections info
     active = []
     if server_app and hasattr(server_app, "connection_manager"):
