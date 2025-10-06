@@ -10,7 +10,7 @@ import re
 import ssl
 import unicodedata
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, MISSING
 from datetime import datetime, timedelta, date, timezone, time
 from pathlib import Path
 from typing import Any, Optional
@@ -84,7 +84,7 @@ _POLISH_ASCII_MAP = str.maketrans(
 class TelegramConfig:
     """Configuration holder for Telegram integration."""
 
-    enabled: bool = False
+    enabled: bool = True
     bot_token: Optional[str] = None
     bot_token_env: str = "TELEGRAM_BOT_TOKEN"
     default_user_id: Optional[str] = "1"
@@ -117,7 +117,8 @@ class TelegramConfig:
 def load_telegram_config(raw: dict[str, Any]) -> TelegramConfig:
     """Create TelegramConfig from raw config dict."""
 
-    enabled = bool(raw.get("enabled", False))
+    enabled_raw = raw.get("enabled")
+    enabled = bool(enabled_raw) if enabled_raw is not None else True
     token = raw.get("bot_token")
     token_env = raw.get("bot_token_env", "TELEGRAM_BOT_TOKEN")
 
@@ -132,9 +133,16 @@ def load_telegram_config(raw: dict[str, Any]) -> TelegramConfig:
         if key_str and value_str:
             mapping[key_str] = value_str
 
-    default_user_id = raw.get("default_user_id")
-    if default_user_id is not None:
-        default_user_id = str(default_user_id).strip() or None
+    default_user_field = TelegramConfig.__dataclass_fields__["default_user_id"]
+    default_user_default = (
+        default_user_field.default if default_user_field.default is not MISSING else None
+    )
+    default_user_id_raw = raw.get("default_user_id")
+    if default_user_id_raw is None:
+        default_user_id = default_user_default
+    else:
+        candidate_default = default_user_default or None
+        default_user_id = str(default_user_id_raw).strip() or candidate_default
 
     daily_brief_raw = raw.get("daily_brief", {}) or {}
     daily_brief_storage = str(
@@ -416,7 +424,7 @@ class TelegramBotService:
 
         user_id = self.config.resolve_user_id(chat_id)
         if not user_id:
-            logger.error("Cannot resolve GAJA user for chat %s", chat_id)
+            logger.error(f"Cannot resolve GAJA user for chat {chat_id}")
             await message.reply_text("Konfiguracja bota nie przypisuje użytkownika do tego czatu.")
             return
 

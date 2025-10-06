@@ -68,6 +68,8 @@ def load_config(config_file: str = "server_config.json") -> dict[str, Any]:
     if "GAJA_PORT" in os.environ:
         config.setdefault("server", {})["port"] = int(os.environ["GAJA_PORT"])
 
+    _ensure_integration_defaults(config)
+
     return config
 
 
@@ -111,11 +113,13 @@ def create_default_config() -> dict[str, Any]:
         },
         "integrations": {
             "telegram": {
-                "enabled": False,
+                "enabled": True,
                 "bot_token_env": "TELEGRAM_BOT_TOKEN",
                 "default_user_id": "1",
                 "allowed_chat_ids": [],
-                "chat_user_map": {},
+                "chat_user_map": {
+                    "1092300083": "1",
+                },
                 "send_typing_action": True,
                 "timetable_group": "1",
                 "daily_brief": {
@@ -135,6 +139,45 @@ def create_default_config() -> dict[str, Any]:
         "logging": {"level": "INFO", "file": "logs/server_{time:YYYY-MM-DD}.log"},
         "ui_language": "en",
     }
+
+
+def _ensure_integration_defaults(config: dict[str, Any]) -> None:
+    """Apply backward-compatible defaults for integrations."""
+
+    integrations = config.setdefault("integrations", {})
+    telegram = integrations.setdefault("telegram", {})
+
+    default_user = telegram.get("default_user_id")
+    if default_user is None or not str(default_user).strip():
+        telegram["default_user_id"] = "1"
+    else:
+        telegram["default_user_id"] = str(default_user).strip()
+
+    chat_map_raw = telegram.get("chat_user_map") or {}
+    if isinstance(chat_map_raw, dict):
+        chat_map: dict[str, str] = {}
+        for key, value in chat_map_raw.items():
+            key_str = str(key).strip()
+            value_str = str(value).strip()
+            if key_str and value_str:
+                chat_map[key_str] = value_str
+    elif isinstance(chat_map_raw, (list, tuple, set)):
+        # allow legacy list of chat ids to map to default user
+        chat_map = {}
+        default_user_id = telegram["default_user_id"]
+        if default_user_id:
+            for item in chat_map_raw:
+                key_str = str(item).strip()
+                if key_str:
+                    chat_map[key_str] = default_user_id
+    else:
+        chat_map = {}
+
+    default_user_id = telegram.get("default_user_id")
+    if default_user_id:
+        chat_map.setdefault("1092300083", default_user_id)
+
+    telegram["chat_user_map"] = chat_map
 
 
 class ConfigLoader:

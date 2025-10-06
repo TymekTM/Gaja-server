@@ -71,11 +71,13 @@
   },
   "integrations": {
         "telegram": {
-            "enabled": false,
+            "enabled": true,
             "bot_token_env": "TELEGRAM_BOT_TOKEN",
             "default_user_id": "1",
             "allowed_chat_ids": [],
-            "chat_user_map": {},
+            "chat_user_map": {
+                "1092300083": "1"
+            },
             "send_typing_action": true,
             "timetable_group": "1",
             "daily_brief": {
