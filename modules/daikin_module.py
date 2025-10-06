@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, NamedTuple, Optional
 
 import httpx
 
@@ -23,8 +22,7 @@ PLUGIN_AUTHOR = "GAJA Team"
 PLUGIN_DEPENDENCIES: list[str] = ["httpx"]
 
 
-@dataclass(slots=True)
-class _RequestResult:
+class _RequestResult(NamedTuple):
     ok: bool
     data: Any
     status: int
@@ -323,14 +321,22 @@ class DaikinModule(BaseModule, TestModeSupport):
         return self._create_error_response(detail, code=str(status or "request_error"))
 
 
-daikin_module = DaikinModule()
+_daikin_module_instance: Optional[DaikinModule] = None
+
+
+def _get_module() -> DaikinModule:
+    global _daikin_module_instance
+    if _daikin_module_instance is None:
+        _daikin_module_instance = DaikinModule()
+    return _daikin_module_instance
 
 
 def get_functions():
-    return daikin_module.get_functions()
+    return _get_module().get_functions()
 
 
 async def execute_function(function_name: str, parameters: Dict[str, Any], user_id: str):
-    if not daikin_module._initialized:
-        await daikin_module.initialize()
-    return await daikin_module.safe_execute(function_name, parameters, user_id)
+    module = _get_module()
+    if not module._initialized:
+        await module.initialize()
+    return await module.safe_execute(function_name, parameters, user_id)
