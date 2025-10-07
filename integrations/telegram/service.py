@@ -838,7 +838,10 @@ class TelegramBotService:
                     logger.error(f"Failed to send daily brief to chat {chat_id}: {exc}")
                     await asyncio.sleep(10)
         finally:
-            self._daily_brief_tasks.pop(chat_id, None)
+            current_task = asyncio.current_task()
+            stored_task = self._daily_brief_tasks.get(chat_id)
+            if stored_task is current_task:
+                self._daily_brief_tasks.pop(chat_id, None)
 
     async def _generate_daily_brief_messages(
         self, chat_id: str, settings: dict[str, Any], *, count: int
