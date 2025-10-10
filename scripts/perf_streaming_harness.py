@@ -1,10 +1,15 @@
-import sys, asyncio, time, json, math, os, statistics, random
+import sys, asyncio, time, json, math, statistics, random
 from collections import deque, defaultdict
+
 sys.path.append('Gaja-server')
+
+from core.app_paths import migrate_legacy_file, resolve_data_path
 from modules.ai_module import generate_response  # noqa
 
-LATENCY_FILE = 'user_data/latency_events.jsonl'
-OUT_FILE = 'user_data/perf_streaming_summary.json'
+LATENCY_PATH = resolve_data_path('latency_events.jsonl', create_parents=True)
+migrate_legacy_file('user_data/latency_events.jsonl', LATENCY_PATH)
+OUT_PATH = resolve_data_path('perf_streaming_summary.json', create_parents=True)
+migrate_legacy_file('user_data/perf_streaming_summary.json', OUT_PATH)
 
 
 def pct(data, p):
@@ -29,8 +34,8 @@ async def one_call(i, stream=True):
 
 async def main(warmup=1, measured=5):
     # Optionally truncate old events
-    if os.path.exists(LATENCY_FILE):
-        os.remove(LATENCY_FILE)
+    if LATENCY_PATH.exists():
+        LATENCY_PATH.unlink()
     totals = []
     tids = []
     for i in range(warmup + measured):
@@ -41,8 +46,8 @@ async def main(warmup=1, measured=5):
             tids.append(tid)
     # Load events and compute streaming specific metrics
     events = []
-    if os.path.exists(LATENCY_FILE):
-        with open(LATENCY_FILE,'r',encoding='utf-8') as f:
+    if LATENCY_PATH.exists():
+        with LATENCY_PATH.open('r',encoding='utf-8') as f:
             for line in f:
                 try:
                     events.append(json.loads(line))
@@ -145,7 +150,7 @@ async def main(warmup=1, measured=5):
         'spearman_chars_provider_ms': round(spearman_chars_latency,3),
         'pearson_tokens_ci95': [round(pearson_tokens_ci[0],3), round(pearson_tokens_ci[1],3)],
     }
-    with open(OUT_FILE,'w',encoding='utf-8') as f:
+    with OUT_PATH.open('w',encoding='utf-8') as f:
         json.dump(summary,f,ensure_ascii=False,indent=2)
     print('STREAMING SUMMARY:', json.dumps(summary, ensure_ascii=False, indent=2))
 

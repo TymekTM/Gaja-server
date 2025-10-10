@@ -1,6 +1,9 @@
-import sys, asyncio, json, os, time
-from collections import deque, defaultdict
+import sys, asyncio, json, time
+from collections import deque
+
 import pytest
+
+from core.app_paths import migrate_legacy_file, resolve_data_path
 
 # Adjust path
 if 'Gaja-server' not in sys.path:
@@ -8,7 +11,9 @@ if 'Gaja-server' not in sys.path:
 
 from modules.ai_module import generate_response  # noqa
 
-LAT_FILE = 'user_data/latency_events.jsonl'
+LAT_PATH = resolve_data_path('latency_events.jsonl', create_parents=True)
+migrate_legacy_file('user_data/latency_events.jsonl', LAT_PATH)
+LAT_FILE = str(LAT_PATH)
 
 async def _single_call(tag: str):
     hist = deque([{'role':'user','content':'Powiedz jedno zdanie powitania.'}])
@@ -18,9 +23,9 @@ async def _single_call(tag: str):
     return total
 
 def _extract_stage(tracking_id: str):
-    if not os.path.exists(LAT_FILE):
+    if not LAT_PATH.exists():
         return None, None
-    with open(LAT_FILE,'r',encoding='utf-8') as f:
+    with LAT_PATH.open('r',encoding='utf-8') as f:
         evs = [json.loads(l) for l in f if tracking_id in l]
     if not evs:
         return None, None
@@ -36,8 +41,8 @@ def _extract_stage(tracking_id: str):
 @pytest.mark.ai
 async def test_warm_cache_reduces_prompt_and_total_time():
     # clean latency file
-    if os.path.exists(LAT_FILE):
-        os.remove(LAT_FILE)
+    if LAT_PATH.exists():
+        LAT_PATH.unlink()
     cold_total = await _single_call('perf_test_cold')
     warm_total = await _single_call('perf_test_warm')
     # extract

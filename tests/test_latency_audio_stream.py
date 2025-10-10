@@ -1,9 +1,12 @@
-import os
-import json
 import asyncio
-import time
 import base64
+import json
+import os
+import time
+
 import pytest
+
+from core.app_paths import migrate_legacy_file, resolve_data_path
 
 from websockets import connect as ws_connect
 
@@ -84,9 +87,9 @@ async def test_time_to_first_audio_chunk_stub(monkeypatch):
         assert first_chunk_latency < 4.0, f"First audio chunk latency too high: {first_chunk_latency:.2f}s"
 
         # Store metric for later aggregation (append JSONL)
-        metrics_path = os.path.join('user_data', 'latency_audio_metrics.jsonl')
-        os.makedirs('user_data', exist_ok=True)
-        with open(metrics_path, 'a', encoding='utf-8') as f:
+        metrics_path = resolve_data_path('latency_audio_metrics.jsonl', create_parents=True)
+        migrate_legacy_file('user_data/latency_audio_metrics.jsonl', metrics_path)
+        with metrics_path.open('a', encoding='utf-8') as f:
             f.write(json.dumps({
                 'metric': 'time_to_first_audio_chunk_stub',
                 'latency_s': first_chunk_latency,

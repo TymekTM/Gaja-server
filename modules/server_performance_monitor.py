@@ -14,9 +14,10 @@ import json
 import logging
 import time
 from dataclasses import dataclass, asdict
-from pathlib import Path
-from typing import Dict, List, Optional, Any
 from statistics import mean, median, stdev
+from typing import Any, Dict, List, Optional
+
+from core.app_paths import migrate_legacy_file, resolve_data_path
 
 logger = logging.getLogger(__name__)
 
@@ -275,10 +276,10 @@ class ServerPerformanceMonitor:
         }
         
         # Save to user_data directory
-        save_path = Path(__file__).parent.parent / "user_data" / filename
-        save_path.parent.mkdir(exist_ok=True)
-        
-        with open(save_path, 'w', encoding='utf-8') as f:
+        save_path = resolve_data_path("server_performance", filename, create_parents=True)
+        migrate_legacy_file(f"user_data/{filename}", save_path)
+
+        with save_path.open('w', encoding='utf-8') as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
         
         logger.info(f"💾 Server performance results saved to {save_path}")

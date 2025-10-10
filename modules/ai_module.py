@@ -2,25 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import logging
 import os
 import re
+import time
 from collections import deque
-from time import perf_counter, time as epoch_time
-import asyncio
 from collections.abc import Callable
 from functools import lru_cache
-import hashlib
+from pathlib import Path
+from time import perf_counter, time as epoch_time
 from typing import Any, Optional
-import time
 
 import httpx  # Async HTTP client replacing requests
 from config.config_loader import MAIN_MODEL, PROVIDER, _config, load_config
 from core.performance_monitor import measure_performance
 from templates.prompt_builder import build_convert_query_prompt, build_full_system_prompt
 from templates.prompts import WEATHER_STYLE_PROMPT
+
+from core.app_paths import migrate_legacy_file, resolve_data_path
 
 # -----------------------------------------------------------------------------
 # Konfiguracja logów
@@ -85,12 +87,23 @@ class LatencyTracer:
             payload["extra"] = safe_extra
         self.events.append(payload)
 
-    def flush_to_file(self, path: str = "user_data/latency_events.jsonl"):
+    def flush_to_file(self, path: str | os.PathLike[str] | None = None):
         if not self.enabled or not self.events:
             return
+
+        if path is None:
+            target_path = resolve_data_path("latency_events.jsonl", create_parents=True)
+            migrate_legacy_file("user_data/latency_events.jsonl", target_path)
+        else:
+            candidate = Path(path)
+            if candidate.is_absolute():
+                target_path = candidate
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                target_path = resolve_data_path(*candidate.parts, create_parents=True)
+
         try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "a", encoding="utf-8") as f:
+            with target_path.open("a", encoding="utf-8") as f:
                 for ev in self.events:
                     f.write(json.dumps(ev, ensure_ascii=False) + "\n")
         except Exception as exc:  # pragma: no cover
@@ -1746,7 +1759,9 @@ async def generate_response(
 
     def log_append(lines: list[str]):  # small helper to centralize logging writes
         try:
-            with open("user_data/prompts_log.txt", "a", encoding="utf-8") as f:
+            target_log = resolve_data_path("prompts_log.txt", create_parents=True)
+            migrate_legacy_file("user_data/prompts_log.txt", target_log)
+            with target_log.open("a", encoding="utf-8") as f:
                 for ln in lines:
                     f.write(ln + "\n")
         except Exception as log_exc:  # pragma: no cover

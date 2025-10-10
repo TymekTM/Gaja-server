@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-from pathlib import Path
 import json
-from datetime import datetime, timedelta
 import sqlite3
+from datetime import datetime, timedelta
+from pathlib import Path
+
 import pytest
+
+from core.app_paths import resolve_data_path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODULES_DIR = BASE_DIR / "modules"
@@ -34,7 +37,7 @@ try:
     _DBM = get_database_manager()
     DB_PATH = Path(_DBM.db_path)
 except Exception:  # fallback – previous behaviour
-    DB_PATH = Path.cwd() / "server_data.db"
+    DB_PATH = resolve_data_path("server_data.db", create_parents=True)
 
 # Consistent user id used across tests
 USER_ID = 2

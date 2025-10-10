@@ -12,6 +12,8 @@ from typing import Any
 
 import aiohttp
 
+from core.app_paths import migrate_legacy_file, resolve_data_path
+
 # AI and memory integration imports
 logger = logging.getLogger(__name__)
 
@@ -83,8 +85,10 @@ class DailyBriefingModule:
         )
 
         # Session tracking
-        self.session_file = Path("user_data") / "daily_briefing_session.json"
-        self.session_file.parent.mkdir(exist_ok=True)
+        self.session_file = resolve_data_path(
+            "daily_briefing_session.json", create_parents=True
+        )
+        migrate_legacy_file("user_data/daily_briefing_session.json", self.session_file)
 
         # Scheduling
         self._scheduler_task = None

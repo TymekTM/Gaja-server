@@ -1,9 +1,16 @@
-import sys, asyncio, time, json, statistics, math, os
+import sys, asyncio, time, json, statistics, math
 from collections import deque, defaultdict
+
 sys.path.append('Gaja-server')
+
+from core.app_paths import migrate_legacy_file, resolve_data_path
 from modules.ai_module import generate_response  # noqa
 
-LATENCY_FILE = 'user_data/latency_events.jsonl'
+LATENCY_PATH = resolve_data_path('latency_events.jsonl', create_parents=True)
+migrate_legacy_file('user_data/latency_events.jsonl', LATENCY_PATH)
+LATENCY_FILE = str(LATENCY_PATH)
+SUMMARY_PATH = resolve_data_path('perf_harness_summary.json', create_parents=True)
+migrate_legacy_file('user_data/perf_harness_summary.json', SUMMARY_PATH)
 
 def pctl(data, p):
     if not data:
@@ -27,8 +34,8 @@ async def one_call(i):
 
 async def main(warmup=1, measured=3):
     # truncate old latency events for clean run
-    if os.path.exists(LATENCY_FILE):
-        os.remove(LATENCY_FILE)
+    if LATENCY_PATH.exists():
+        LATENCY_PATH.unlink()
     totals = []
     tids = []
     for i in range(warmup + measured):
@@ -49,8 +56,8 @@ async def main(warmup=1, measured=3):
     }
     # stage breakdown from latency events
     stage_totals = defaultdict(list)
-    if os.path.exists(LATENCY_FILE):
-        with open(LATENCY_FILE,'r',encoding='utf-8') as f:
+    if LATENCY_PATH.exists():
+        with LATENCY_PATH.open('r',encoding='utf-8') as f:
             events = [json.loads(l) for l in f]
         # group by tracking_id
         by_tid = defaultdict(list)
@@ -81,7 +88,7 @@ async def main(warmup=1, measured=3):
         }
     result = {'totals': summary, 'stages': stage_summary}
     print('SUMMARY:', json.dumps(result, ensure_ascii=False, indent=2))
-    with open('user_data/perf_harness_summary.json','w',encoding='utf-8') as f:
+    with SUMMARY_PATH.open('w',encoding='utf-8') as f:
         json.dump(result,f,ensure_ascii=False,indent=2)
 
 if __name__ == '__main__':

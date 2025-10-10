@@ -15,55 +15,17 @@ import asyncio
 import json
 import logging
 import os
-import sys
 from datetime import datetime, timedelta
 from typing import Any
 
+from core.app_paths import get_data_root, migrate_legacy_file, resolve_data_path
+
 logger = logging.getLogger(__name__)
 
-# Determine the appropriate directory for persistent application data
-APP_NAME = "Asystent_Server"
-user_data_dir = ""
-
-# Try to establish a user-specific data directory
-try:
-    if os.name == "nt":  # Windows
-        # Use APPDATA, fallback to user's home directory
-        base_dir = os.getenv("APPDATA")
-        if not base_dir:
-            base_dir = os.path.expanduser("~")
-        user_data_dir = os.path.join(base_dir, APP_NAME)
-    else:  # macOS, Linux
-        user_data_dir = os.path.join(os.path.expanduser("~"), f".{APP_NAME.lower()}")
-
-    # Create the directory if it doesn't exist
-    os.makedirs(user_data_dir, exist_ok=True)
-    logger.info(f"Application data will be stored in: {user_data_dir}")
-
-except Exception as e:
-    logger.error(
-        f"Could not create/access user-specific data directory: {e}. Falling back."
-    )
-    # Fallback: try to create a data directory in the current working directory
-    fallback_dir_name = f"{APP_NAME}_data_fallback"
-    try:
-        # Try to use the directory where the script/executable is located if possible
-        if getattr(
-            sys, "frozen", False
-        ):  # If application is frozen (e.g. PyInstaller bundle)
-            app_run_dir = os.path.dirname(sys.executable)
-        else:  # If running as a script
-            app_run_dir = os.path.dirname(os.path.abspath(__file__))
-
-        user_data_dir = os.path.join(app_run_dir, fallback_dir_name)
-        os.makedirs(user_data_dir, exist_ok=True)
-        logger.info(f"Using fallback data directory: {user_data_dir}")
-    except Exception as fallback_e:
-        logger.error(f"Fallback directory creation also failed: {fallback_e}")
-        # If even this fails, set user_data_dir to something to prevent crash on join, though writes will fail
-        user_data_dir = "."
-
-STORAGE_FILE = os.path.join(user_data_dir, "core_storage.json")
+user_data_dir = str(get_data_root())
+storage_path = resolve_data_path("core_storage.json", create_parents=True)
+migrate_legacy_file("core_storage.json", storage_path)
+STORAGE_FILE = str(storage_path)
 logger.info(f"Using storage file: {STORAGE_FILE}")
 
 # Global timer polling task

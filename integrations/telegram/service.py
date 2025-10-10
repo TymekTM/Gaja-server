@@ -21,6 +21,8 @@ import httpx
 
 from loguru import logger
 
+from core.app_paths import migrate_legacy_file, resolve_data_path
+
 _WEEKDAY_ALIASES: dict[int, tuple[str, ...]] = {
     0: ("poniedzialek", "pon"),
     1: ("wtorek", "wt"),
@@ -112,6 +114,26 @@ class TelegramConfig:
         if chat_id in self.chat_user_map:
             return self.chat_user_map[chat_id]
         return self.default_user_id
+
+    def chat_ids_for_user(self, user_id: str | int | None) -> list[str]:
+        """Return configured chat IDs mapped to the given GAJA user."""
+        if user_id is None:
+            return []
+
+        user_id_str = str(user_id).strip()
+        if not user_id_str:
+            return []
+
+        chat_ids = [
+            chat_id
+            for chat_id, mapped_user in self.chat_user_map.items()
+            if str(mapped_user).strip() == user_id_str
+        ]
+
+        if not chat_ids and self.default_user_id and str(self.default_user_id).strip() == user_id_str:
+            chat_ids = list(self.chat_user_map.keys()) or list(self.allowed_chat_ids)
+
+        return list(dict.fromkeys(chat_ids))
 
 
 def load_telegram_config(raw: dict[str, Any]) -> TelegramConfig:
@@ -267,14 +289,65 @@ class TelegramBotService:
 
         self._daily_brief_defaults = base_daily_defaults
         self._daily_brief_lock = asyncio.Lock()
-        root_dir = Path(__file__).resolve().parent.parent.parent
-        storage_path = Path(self.config.daily_brief_storage_path).expanduser()
-        if not storage_path.is_absolute():
-            storage_path = root_dir / storage_path
+        raw_storage = Path(self.config.daily_brief_storage_path).expanduser()
+        if raw_storage.is_absolute():
+            storage_path = raw_storage
+            storage_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            storage_path = resolve_data_path(*raw_storage.parts, create_parents=True)
+        migrate_legacy_file("user_data/telegram_daily_briefs.json", storage_path)
         self._daily_brief_storage_path = storage_path
         self._daily_briefs_config: dict[str, dict[str, Any]] = self._load_daily_brief_settings()
         self._daily_brief_tasks: dict[str, asyncio.Task] = {}
         self._weather_module: Any | None = None
+
+    async def forward_voice_interaction(
+        self, user_id: str | int, query: str, response_text: str
+    ) -> None:
+        """Send a summary of a voice interaction to the mapped Telegram chat."""
+
+        if not self._application or not getattr(self._application, "bot", None):
+            logger.debug("Telegram bot application not ready; skipping voice forwarding")
+            return
+
+        chat_ids = self.config.chat_ids_for_user(user_id)
+        if not chat_ids:
+            chat_ids = list(self.config.allowed_chat_ids)
+        if not chat_ids:
+            chat_ids = list(self.config.chat_user_map.keys())
+        if not chat_ids:
+            logger.debug("No Telegram chat configured for user %s", user_id)
+            return
+
+        query_clean = (query or "").strip()
+        response_clean = (response_text or "").strip()
+        if not query_clean and not response_clean:
+            return
+
+        def _trim(text: str, limit: int = 1500) -> str:
+            text = text.strip()
+            if len(text) > limit:
+                return f"{text[: limit - 3]}..."
+            return text
+
+        parts = []
+        if query_clean:
+            parts.append(f"🎙️ Voice command:\n{_trim(query_clean)}")
+        if response_clean:
+            parts.append(f"🤖 Odpowiedź:\n{_trim(response_clean)}")
+        message = "\n\n".join(parts)
+
+        sent = False
+        for chat_id in dict.fromkeys(chat_ids):
+            try:
+                await self._application.bot.send_message(chat_id=chat_id, text=message)
+                sent = True
+            except Exception as exc:  # pragma: no cover - depends on Telegram API
+                logger.debug(
+                    "Failed to forward voice interaction to chat %s: %s", chat_id, exc
+                )
+        if sent:
+            logger.info("Forwarded voice interaction for user %s to Telegram", user_id)
 
     async def start(self) -> None:
         """Start Telegram polling if enabled and configured."""

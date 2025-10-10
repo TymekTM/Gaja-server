@@ -13,6 +13,8 @@ from typing import Any
 from cryptography.fernet import Fernet
 from loguru import logger
 
+from core.app_paths import migrate_legacy_file, resolve_data_path
+
 
 class DatabaseEncryption:
     """Zarządza szyfrowaniem wrażliwych danych w bazie danych."""
@@ -23,7 +25,8 @@ class DatabaseEncryption:
 
     def _get_or_create_encryption_key(self) -> bytes:
         """Pobiera lub tworzy klucz szyfrowania."""
-        key_file = "db_encryption.key"
+        key_path = resolve_data_path("db_encryption.key", create_parents=True)
+        migrate_legacy_file("db_encryption.key", key_path)
 
         # Sprawdź czy klucz istnieje w zmiennej środowiskowej
         env_key = os.getenv("GAJA_DB_ENCRYPTION_KEY")
@@ -34,9 +37,9 @@ class DatabaseEncryption:
                 logger.warning("Invalid encryption key in environment variable")
 
         # Try to load from file
-        if os.path.exists(key_file):
+        if key_path.exists():
             try:
-                with open(key_file, "rb") as f:
+                with key_path.open("rb") as f:
                     return f.read()
             except Exception:
                 logger.warning("Could not read encryption key from file")
@@ -44,7 +47,8 @@ class DatabaseEncryption:
         # Generate new key
         key = Fernet.generate_key()
         try:
-            with open(key_file, "wb") as f:
+            key_path.parent.mkdir(parents=True, exist_ok=True)
+            with key_path.open("wb") as f:
                 f.write(key)
         except Exception:
             logger.warning("Could not save encryption key to file")
@@ -66,14 +70,16 @@ class DatabaseEncryption:
             # Here would be actual database storage logic
             # For now, we'll use a simple file-based approach
 
-            api_keys_file = "databases/encrypted_api_keys.json"
-            os.makedirs(os.path.dirname(api_keys_file), exist_ok=True)
+            api_keys_path = resolve_data_path(
+                "databases", "encrypted_api_keys.json", create_parents=True
+            )
+            migrate_legacy_file("databases/encrypted_api_keys.json", api_keys_path)
 
             # Load existing keys
             api_keys = {}
-            if os.path.exists(api_keys_file):
+            if api_keys_path.exists():
                 try:
-                    with open(api_keys_file, encoding="utf-8") as f:
+                    with api_keys_path.open(encoding="utf-8") as f:
                         api_keys = json.load(f)
                 except Exception:
                     api_keys = {}
@@ -82,7 +88,7 @@ class DatabaseEncryption:
             api_keys[provider] = encrypted_key
 
             # Save to file
-            with open(api_keys_file, "w", encoding="utf-8") as f:
+            with api_keys_path.open("w", encoding="utf-8") as f:
                 json.dump(api_keys, f, indent=2)
 
             logger.info(f"Stored encrypted API key for provider: {provider}")
@@ -95,13 +101,16 @@ class DatabaseEncryption:
     def get_encrypted_api_key(self, provider: str) -> str | None:
         """Retrieve and decrypt API key from database."""
         try:
-            api_keys_file = "databases/encrypted_api_keys.json"
+            api_keys_path = resolve_data_path(
+                "databases", "encrypted_api_keys.json", create_parents=True
+            )
+            migrate_legacy_file("databases/encrypted_api_keys.json", api_keys_path)
 
-            if not os.path.exists(api_keys_file):
+            if not api_keys_path.exists():
                 return None
 
             # Load API keys
-            with open(api_keys_file, encoding="utf-8") as f:
+            with api_keys_path.open(encoding="utf-8") as f:
                 api_keys = json.load(f)
 
             # Get encrypted key

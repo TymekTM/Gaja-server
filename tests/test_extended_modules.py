@@ -9,14 +9,23 @@ import asyncio
 import importlib.util
 import json
 import sqlite3
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+
 import pytest
+
+from core.app_paths import resolve_data_path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODULES_DIR = BASE_DIR / "modules"
-DB_PATH = BASE_DIR / "server_data.db"
+try:
+    from config.config_manager import get_database_manager  # type: ignore
+
+    _DBM = get_database_manager()
+    DB_PATH = Path(_DBM.db_path)
+except Exception:  # pragma: no cover - fallback for isolated test runs
+    DB_PATH = resolve_data_path("server_data.db", create_parents=True)
 USER_ID = 2
 
 def _ensure_user(user_id: int):

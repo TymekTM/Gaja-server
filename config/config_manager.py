@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
+from core.app_paths import migrate_legacy_file, resolve_data_path
+
 from database.database_models import APIUsage, MemoryContext, Message, User, UserSession
 
 logger = logging.getLogger(__name__)
@@ -148,14 +150,28 @@ class EnvironmentManager:
 class DatabaseManager:
     """Zarządza bazą danych SQLite dla systemu Gaja."""
 
-    def __init__(self, db_path: str = "server_data.db"):
+    def __init__(self, db_path: str | Path | None = None):
         """Inicjalizuje menedżer bazy danych.
 
         Args:
-            db_path: Ścieżka do pliku bazy danych
+            db_path: Ścieżka do pliku bazy danych (względna lub absolutna)
         """
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if db_path is None:
+            resolved_db_path = resolve_data_path("server_data.db", create_parents=True)
+        else:
+            candidate = Path(db_path)
+            if candidate.is_absolute():
+                resolved_db_path = candidate
+                resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                resolved_db_path = resolve_data_path(*candidate.parts, create_parents=True)
+
+        # Migrate legacy database locations if present
+        migrate_legacy_file("server_data.db", resolved_db_path)
+        migrate_legacy_file("data/server_data.db", resolved_db_path)
+
+        self.db_path = resolved_db_path
         self._lock = asyncio.Lock()
         self._local = threading.local()
 

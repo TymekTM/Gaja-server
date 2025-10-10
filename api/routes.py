@@ -18,6 +18,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
 
+from core.app_paths import resolve_data_path
+
 # Import server components
 # from server_main import server_app  # Import moved to avoid circular import
 from core.plugin_manager import plugin_manager
@@ -140,20 +142,21 @@ async def debug_verify_tool(payload: dict[str, Any]) -> dict[str, Any]:
     """Persist verification checkbox state for a function tool.
 
     Body: { name: string, tested: bool }
-    Stores in user_data/debug_tools_verifications.json with timestamp and version.
+    Stores persisted verification state with timestamp and version.
     """
     try:
         name = (payload.get("name") or "").strip()
         tested = bool(payload.get("tested", False))
         if not name:
             raise HTTPException(status_code=400, detail="name required")
-        ver_path = _os.path.join("user_data", "debug_tools_verifications.json")
-        _os.makedirs("user_data", exist_ok=True)
+        ver_path = resolve_data_path(
+            "debug_tools_verifications.json", create_parents=True
+        )
         import json as _json
         data = {}
-        if _os.path.exists(ver_path):
+        if ver_path.exists():
             try:
-                data = _json.loads(open(ver_path, encoding='utf-8').read())
+                data = _json.loads(ver_path.read_text(encoding='utf-8'))
             except Exception:
                 data = {}
         rec = data.get(name) or {}
@@ -164,7 +167,7 @@ async def debug_verify_tool(payload: dict[str, Any]) -> dict[str, Any]:
             "ts": _dt.now().isoformat(),
         })
         data[name] = rec
-        with open(ver_path, "w", encoding="utf-8") as f:
+        with ver_path.open("w", encoding="utf-8") as f:
             _json.dump(data, f, ensure_ascii=False, indent=2)
         return {"success": True, "name": name, "tested": tested, "version": current_version, "ts": rec["ts"]}
     except HTTPException:
@@ -185,12 +188,12 @@ async def debug_list_tools() -> dict[str, Any]:
         funcs = fcs.convert_modules_to_functions() or []
 
         # Load persisted verifications
-        ver_path = _os.path.join("user_data", "debug_tools_verifications.json")
+        ver_path = resolve_data_path("debug_tools_verifications.json", create_parents=True)
         ver = {}
         try:
-            if _os.path.exists(ver_path):
+            if ver_path.exists():
                 import json as _json
-                ver = _json.loads(open(ver_path, encoding='utf-8').read())
+                ver = _json.loads(ver_path.read_text(encoding='utf-8'))
         except Exception:
             ver = {}
 

@@ -1,11 +1,10 @@
+import inspect
 import json
 import logging
-import os
 import threading
 import time
 from collections import defaultdict
 from functools import wraps
-import inspect
 
 try:
     import psutil
@@ -24,15 +23,13 @@ except ImportError:
 import subprocess
 import tracemalloc
 
+from core.app_paths import migrate_legacy_file, resolve_data_path
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
-STATS_FILE = os.path.join(
-    "user_data", "performance_stats.jsonl"
-)  # Use JSON Lines for easier appending
-
-# Ensure user_data directory exists
-if not os.path.exists("user_data"):
-    os.makedirs("user_data", exist_ok=True)
+STATS_PATH = resolve_data_path("performance_stats.jsonl", create_parents=True)
+migrate_legacy_file("user_data/performance_stats.jsonl", STATS_PATH)
+STATS_FILE = str(STATS_PATH)  # Backward compatibility for existing code paths
 stats_lock = threading.Lock()
 
 # Start tracing Python memory allocations for per-function measurements
@@ -218,8 +215,8 @@ def load_and_aggregate_stats():
     temp_aggregated_stats = defaultdict(lambda: {"total_time": 0.0, "count": 0})
     try:
         with stats_lock:  # Ensure file isn't being written to while reading
-            if os.path.exists(STATS_FILE):
-                with open(STATS_FILE, encoding="utf-8") as f:
+            if STATS_PATH.exists():
+                with STATS_PATH.open(encoding="utf-8") as f:
                     for line in f:
                         try:
                             entry = json.loads(line)
@@ -273,8 +270,8 @@ def clear_performance_stats():
     global aggregated_stats
     try:
         with stats_lock:
-            if os.path.exists(STATS_FILE):
-                os.remove(STATS_FILE)
+            if STATS_PATH.exists():
+                STATS_PATH.unlink()
         with aggregation_lock:
             aggregated_stats = defaultdict(lambda: {"total_time": 0.0, "count": 0})
         logger.info(f"Performance stats file {STATS_FILE} cleared.")

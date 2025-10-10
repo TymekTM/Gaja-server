@@ -2,6 +2,7 @@
 """GAJA Assistant Server Główny serwer obsługujący wielu użytkowników, zarządzający AI,
 bazą danych i pluginami."""
 
+import asyncio
 import json
 import os
 import sys
@@ -133,6 +134,7 @@ class ServerApp:
                 data = message_data.get("data", {})
                 query = data.get("query", "")
                 context = data.get("context", {})
+                assistant_text: Optional[str] = None
 
                 # DEBUG: Log actual user query to debug inappropriate tool calls
                 logger.warning(f"🎯 USER QUERY: '{query}' (type: {message_type})")
@@ -329,6 +331,7 @@ class ServerApp:
                         if isinstance(parsed_response, dict) and "text" in parsed_response:
                             text_to_speak = parsed_response["text"]
                             if text_to_speak:
+                                assistant_text = text_to_speak.strip() or None
                                 logger.debug("Generating TTS audio...")
                                 start_server_timer(query_id, "tts_generation")
                                 tts_audio = await self._generate_tts_audio(text_to_speak)
@@ -341,6 +344,7 @@ class ServerApp:
                             start_server_timer(query_id, "tts_generation")
                             tts_audio = await self._generate_tts_audio(response.strip())
                             end_server_timer(query_id, "tts_generation")
+                            assistant_text = response.strip()
                     except Exception as tts_err:
                         end_server_timer(query_id, "tts_generation")
                         logger.error(f"TTS generation failed: {tts_err}")
@@ -378,7 +382,21 @@ class ServerApp:
                         logger.info("TTS audio encoded and added to response")
                     else:
                         logger.info("No TTS audio to include in response")
-                    
+
+                    final_response_text = assistant_text or (
+                        response.strip() if isinstance(response, str) else ""
+                    )
+                    if (
+                        message_type == "voice_command"
+                        and final_response_text
+                        and self.telegram_service
+                    ):
+                        asyncio.create_task(
+                            self._forward_voice_result_to_telegram(
+                                str(user_id), query or "", final_response_text
+                            )
+                        )
+
                     start_server_timer(query_id, "websocket_send")
                     await self.connection_manager.send_to_user(
                         user_id,
@@ -1013,6 +1031,19 @@ class ServerApp:
                         )
         except Exception as e:
             logger.debug(f"Error loading user plugins: {e}")
+
+    async def _forward_voice_result_to_telegram(
+        self, user_id: str, query: str, response_text: str
+    ) -> None:
+        if not self.telegram_service:
+            return
+
+        try:
+            await self.telegram_service.forward_voice_interaction(
+                user_id, query, response_text
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug(f"Voice → Telegram bridge failed for user {user_id}: {exc}")
 
     async def _generate_tts_audio(self, text: str) -> Optional[bytes]:
         """Generate TTS audio from text using OpenAI API."""
